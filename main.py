@@ -1,996 +1,981 @@
 #!/usr/bin/env python3
 """
-Background Removal and Seamless Combination CLI Tool
-
-A professional command-line tool for removing backgrounds, creating masks,
-isolating backgrounds, and combining them into seamless panoramic images.
-
-Author: CLI Background Tool
-Version: 1.0.0
+Wallege - Professional background removal and seamless image combination CLI tool
 """
 
-import os
-import sys
-import cv2
-import numpy as np
-from rembg import remove
-from PIL import Image
-import glob
 import argparse
-from pathlib import Path
 import io
-from typing import List, Tuple, Optional, Union
+import sys
+from pathlib import Path
+from typing import List, Union
+from PIL import Image, ImageOps, ImageFilter, ImageDraw
+from rembg import remove
+import numpy as np
+import cv2
+import math
 
-# Try to import tkinter with fallback for headless systems
-try:
-    import tkinter as tk
-    TKINTER_AVAILABLE = True
-except ImportError:
-    TKINTER_AVAILABLE = False
-    print("⚠️  tkinter not available - using fallback resolution detection")
 
-class BackgroundProcessor:
-    """Main class for background processing operations"""
+class ImageCombiner:
+    """Handles image input processing and combination orchestration"""
     
-    def __init__(self):
-        self.supported_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp']
-        
-    def is_image_file(self, filepath: str) -> bool:
-        """Check if file is a supported image format"""
-        return Path(filepath).suffix.lower() in self.supported_extensions
+    SUPPORTED_FORMATS = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp'}
     
-    def get_image_files(self, path: str) -> List[str]:
-        """Get all image files from a path (file or directory)"""
-        path_obj = Path(path).resolve()  # Resolve to absolute path
+    def __init__(self, debug: bool = False):
+        self.debug = debug
+    
+    def get_images_from_input(self, input_path: Union[str, List[str]]) -> List[Path]:
+        """
+        Process input to get list of image files.
         
-        if not path_obj.exists():
-            raise FileNotFoundError(f"Path does not exist: {path_obj}")
-        
-        # Check if we have read permissions
-        if not os.access(str(path_obj), os.R_OK):
-            raise PermissionError(f"No read permission for: {path_obj}")
-        
-        if path_obj.is_file():
-            if self.is_image_file(str(path_obj)):
-                return [str(path_obj)]
-            else:
-                raise ValueError(f"File is not a supported image format: {path_obj}")
-        
-        elif path_obj.is_dir():
-            image_files = []
+        Args:
+            input_path: Either a directory path, single file path, or list of file paths
             
-            try:
-                # Use pathlib for cross-platform glob patterns
-                for ext in self.supported_extensions:
-                    # Case insensitive search using both cases
-                    image_files.extend(path_obj.glob(f"*{ext}"))
-                    image_files.extend(path_obj.glob(f"*{ext.upper()}"))
-                
-                # Convert to strings and sort
-                image_files = [str(f) for f in image_files]
-                image_files.sort()
-                
-                if not image_files:
-                    raise ValueError(f"No supported images found in directory: {path_obj}")
-                
-                return image_files
-                
-            except PermissionError:
-                raise PermissionError(f"No permission to read directory: {path_obj}")
+        Returns:
+            List of Path objects for valid image files
+            
+        Raises:
+            FileNotFoundError: If path doesn't exist
+            ValueError: If no valid images found
+        """
+        image_paths = []
         
+        if isinstance(input_path, list):
+            # Handle list of file paths
+            for path_str in input_path:
+                path = Path(path_str)
+                if not path.exists():
+                    print(f"Warning: File {path} does not exist, skipping")
+                    continue
+                if self._is_supported_image(path):
+                    image_paths.append(path)
+                else:
+                    print(f"Warning: Unsupported format {path.suffix}, skipping {path}")
         else:
-            raise ValueError(f"Path is neither file nor directory: {path_obj}")
-
-    def remove_background(self, image_path: str) -> Image.Image:
-        """Remove background from an image using rembg library"""
-        with open(image_path, 'rb') as input_file:
-            input_data = input_file.read()
+            # Handle single path (file or directory)
+            path = Path(input_path)
+            if not path.exists():
+                raise FileNotFoundError(f"Path does not exist: {path}")
+            
+            if path.is_file():
+                if self._is_supported_image(path):
+                    image_paths.append(path)
+                else:
+                    raise ValueError(f"Unsupported image format: {path.suffix}")
+            elif path.is_dir():
+                # Get all supported images from directory
+                for file_path in path.iterdir():
+                    if file_path.is_file() and self._is_supported_image(file_path):
+                        image_paths.append(file_path)
+            else:
+                raise ValueError(f"Invalid path type: {path}")
         
-        output_data = remove(input_data)
-        output_image = Image.open(io.BytesIO(output_data))
-        return output_image
-
-    def create_mask_from_removed_bg(self, removed_bg_image: Image.Image) -> np.ndarray:
-        """Create a binary mask from the background-removed image"""
-        img_array = np.array(removed_bg_image)
+        if not image_paths:
+            raise ValueError("No valid images found in input")
         
-        if img_array.shape[2] == 4:  # RGBA
-            alpha_channel = img_array[:, :, 3]
+        # Sort for consistent ordering
+        image_paths.sort()
+        return image_paths
+    
+    def _is_supported_image(self, path: Path) -> bool:
+        """Check if file has supported image extension"""
+        return path.suffix.lower() in self.SUPPORTED_FORMATS
+    
+    def remove_backgrounds(self, image_paths: List[Path], debug_dir: Path = None) -> List[Image.Image]:
+        """
+        Remove backgrounds from list of images using rembg.
+        
+        Args:
+            image_paths: List of Path objects for input images
+            debug_dir: Optional directory to save debug output
+            
+        Returns:
+            List of PIL Images with backgrounds removed
+        """
+        processed_images = []
+        
+        print(f"Step 1: Removing backgrounds from {len(image_paths)} images...")
+        
+        for i, image_path in enumerate(image_paths, 1):
+            print(f"  Processing {i}/{len(image_paths)}: {image_path.name}")
+            
+            # Load and process image
+            with open(image_path, 'rb') as input_file:
+                input_data = input_file.read()
+            
+            # Remove background using rembg
+            output_data = remove(input_data)
+            
+            # Convert to PIL Image
+            processed_image = Image.open(io.BytesIO(output_data))
+            processed_images.append(processed_image)
+            
+            # Save debug output if requested
+            if debug_dir and self.debug:
+                debug_path = debug_dir / f"step1_bg_removed_{image_path.stem}.png"
+                processed_image.save(debug_path)
+                print(f"    Debug: Saved background-removed image to {debug_path}")
+        
+        print(f"Step 1 complete: {len(processed_images)} images processed")
+        return processed_images
+    
+    def extract_backgrounds(self, original_paths: List[Path], processed_images: List[Image.Image], debug_dir: Path = None) -> List[Image.Image]:
+        """
+        Extract backgrounds from original images using processed images as masks.
+        
+        Args:
+            original_paths: List of original image file paths
+            processed_images: List of background-removed images to use as masks
+            debug_dir: Optional directory to save debug output
+            
+        Returns:
+            List of PIL Images containing extracted backgrounds
+        """
+        background_images = []
+        
+        print(f"\nStep 2: Extracting backgrounds from {len(original_paths)} images...")
+        
+        for i, (original_path, processed_image) in enumerate(zip(original_paths, processed_images), 1):
+            print(f"  Processing {i}/{len(original_paths)}: {original_path.name}")
+            
+            # Load original image
+            original_image = Image.open(original_path).convert('RGBA')
+            
+            # Create mask from processed image alpha channel
+            if processed_image.mode != 'RGBA':
+                processed_image = processed_image.convert('RGBA')
+            
+            # Extract alpha channel as mask
+            mask = processed_image.split()[-1]  # Get alpha channel
+            
+            # Invert mask to get background areas (where alpha was 0)
+            inverted_mask = ImageOps.invert(mask)
+            
+            # Create background image by applying inverted mask
+            background = Image.new('RGBA', original_image.size, (0, 0, 0, 0))
+            
+            # Convert images to numpy arrays for easier manipulation
+            orig_array = np.array(original_image)
+            mask_array = np.array(inverted_mask)
+            bg_array = np.array(background)
+            
+            # Apply mask to extract background
+            # Where mask is white (255), keep original pixel
+            # Where mask is black (0), keep transparent
+            for c in range(3):  # RGB channels
+                bg_array[:, :, c] = orig_array[:, :, c] * (mask_array / 255.0)
+            
+            # Set alpha channel based on inverted mask
+            bg_array[:, :, 3] = mask_array
+            
+            # Convert back to PIL Image
+            background_image = Image.fromarray(bg_array.astype('uint8'), 'RGBA')
+            background_images.append(background_image)
+            
+            # Save debug output if requested
+            if debug_dir and self.debug:
+                # Save mask
+                mask_path = debug_dir / f"step2_mask_{original_path.stem}.png"
+                mask.save(mask_path)
+                
+                # Save inverted mask
+                inverted_mask_path = debug_dir / f"step2_inverted_mask_{original_path.stem}.png"
+                inverted_mask.save(inverted_mask_path)
+                
+                # Save extracted background
+                bg_path = debug_dir / f"step2_background_{original_path.stem}.png"
+                background_image.save(bg_path)
+                
+                print(f"    Debug: Saved mask to {mask_path}")
+                print(f"    Debug: Saved inverted mask to {inverted_mask_path}")
+                print(f"    Debug: Saved background to {bg_path}")
+        
+        print(f"Step 2 complete: {len(background_images)} backgrounds extracted")
+        return background_images
+    
+    def inpaint_backgrounds(self, background_images: List[Image.Image], processed_images: List[Image.Image], debug_dir: Path = None) -> List[Image.Image]:
+        """
+        Fill in blank spaces left by masks in background images using inpainting.
+        
+        Args:
+            background_images: List of extracted background images with gaps
+            processed_images: List of background-removed images to create inpainting masks
+            debug_dir: Optional directory to save debug output
+            
+        Returns:
+            List of PIL Images with inpainted (filled) backgrounds
+        """
+        inpainted_images = []
+        
+        print(f"\nStep 3: Inpainting {len(background_images)} background images...")
+        
+        for i, (bg_image, processed_image) in enumerate(zip(background_images, processed_images), 1):
+            print(f"  Processing {i}/{len(background_images)}: Inpainting background gaps")
+            
+            # Convert PIL images to OpenCV format (BGR)
+            bg_cv = cv2.cvtColor(np.array(bg_image.convert('RGB')), cv2.COLOR_RGB2BGR)
+            
+            # Create inpainting mask from processed image alpha channel
+            if processed_image.mode != 'RGBA':
+                processed_image = processed_image.convert('RGBA')
+            
+            # Extract alpha channel and convert to mask for inpainting
+            alpha_mask = processed_image.split()[-1]
+            inpaint_mask = np.array(alpha_mask)
+            
+            # Inpainting mask should be white (255) where we want to fill
+            # Alpha channel is 255 where subject was, 0 where background was
+            # So we use the alpha channel directly as inpainting mask
+            
+            # Apply inpainting using OpenCV
+            # Using INPAINT_TELEA algorithm (fast, good for texture)
+            inpainted_cv = cv2.inpaint(bg_cv, inpaint_mask, 3, cv2.INPAINT_TELEA)
+            
+            # Alternative: INPAINT_NS (Navier-Stokes, better for smooth areas)
+            # inpainted_cv = cv2.inpaint(bg_cv, inpaint_mask, 3, cv2.INPAINT_NS)
+            
+            # Convert back to PIL format (RGB)
+            inpainted_rgb = cv2.cvtColor(inpainted_cv, cv2.COLOR_BGR2RGB)
+            inpainted_image = Image.fromarray(inpainted_rgb, 'RGB')
+            inpainted_images.append(inpainted_image)
+            
+            # Save debug output if requested
+            if debug_dir and self.debug:
+                # Save inpainting mask
+                mask_path = debug_dir / f"step3_inpaint_mask_{i:03d}.png"
+                Image.fromarray(inpaint_mask, 'L').save(mask_path)
+                
+                # Save original background with gaps
+                bg_path = debug_dir / f"step3_bg_with_gaps_{i:03d}.png"
+                bg_image.convert('RGB').save(bg_path)
+                
+                # Save inpainted result
+                inpainted_path = debug_dir / f"step3_inpainted_{i:03d}.png"
+                inpainted_image.save(inpainted_path)
+                
+                print(f"    Debug: Saved inpaint mask to {mask_path}")
+                print(f"    Debug: Saved original background to {bg_path}")
+                print(f"    Debug: Saved inpainted result to {inpainted_path}")
+        
+        print(f"Step 3 complete: {len(inpainted_images)} backgrounds inpainted")
+        return inpainted_images
+    
+    def determine_background_type(self, inpainted_images: List[Image.Image], background_type: str = 'auto') -> str:
+        """
+        Automatically determine the best background type or return specified type.
+        
+        Args:
+            inpainted_images: List of inpainted background images
+            background_type: Specified background type or 'auto'
+            
+        Returns:
+            Background type to use: 'concat', 'texture', 'pattern', or 'gradient'
+        """
+        if background_type != 'auto':
+            return background_type
+        
+        num_images = len(inpainted_images)
+        
+        # Auto-determination logic
+        if num_images == 1:
+            return 'texture'  # Single image works well as texture
+        elif num_images <= 4:
+            return 'concat'   # Small number works well concatenated
         else:
-            gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
-            alpha_channel = (gray > 0).astype(np.uint8) * 255
+            return 'gradient'  # Many images work better as gradient
+    
+    def create_seamless_blend_mask(self, size: tuple, direction: str, blend_width: int = 50) -> Image.Image:
+        """
+        Create a gradient mask for seamless blending.
         
-        mask = (alpha_channel > 0).astype(np.uint8) * 255
+        Args:
+            size: (width, height) of the mask
+            direction: 'horizontal' or 'vertical'
+            blend_width: Width of the blend zone in pixels
+            
+        Returns:
+            Grayscale mask image for blending
+        """
+        mask = Image.new('L', size, 255)
+        draw = ImageDraw.Draw(mask)
+        
+        if direction == 'horizontal':
+            # Create horizontal gradient for left edge
+            for x in range(min(blend_width, size[0])):
+                alpha = int(255 * (x / blend_width))
+                draw.line([(x, 0), (x, size[1])], fill=alpha)
+        elif direction == 'vertical':
+            # Create vertical gradient for top edge
+            for y in range(min(blend_width, size[1])):
+                alpha = int(255 * (y / blend_width))
+                draw.line([(0, y), (size[0], y)], fill=alpha)
+        
         return mask
-
-    def isolate_background(self, original_image_path: str, mask: np.ndarray) -> np.ndarray:
-        """Isolate the background using the mask"""
-        original_img = cv2.imread(original_image_path)
-        
-        if original_img.shape[:2] != mask.shape:
-            mask = cv2.resize(mask, (original_img.shape[1], original_img.shape[0]))
-        
-        background_mask = cv2.bitwise_not(mask)
-        background_only = cv2.bitwise_and(original_img, original_img, mask=background_mask)
-        
-        return background_only
-
-class ResolutionManager:
-    """Manages screen resolution detection and presets"""
     
-    @staticmethod
-    def get_screen_resolution() -> Tuple[int, int]:
-        """Get the current screen resolution with fallback for headless systems"""
+    def create_concatenated_background(self, inpainted_images: List[Image.Image], arrangement: str, target_size: tuple) -> Image.Image:
+        """
+        Create background by concatenating inpainted images with seamless blending.
         
-        # Method 1: Try tkinter (works on systems with GUI)
-        if TKINTER_AVAILABLE:
-            try:
-                # Check if DISPLAY is available on Unix-like systems
-                if os.name == 'posix' and 'DISPLAY' not in os.environ:
-                    print("⚠️  No DISPLAY environment variable - using fallback resolution")
-                    return 1920, 1080
+        Args:
+            inpainted_images: List of inpainted background images
+            arrangement: 'horizontal', 'vertical', or 'grid'
+            target_size: (width, height) for output
+            
+        Returns:
+            Combined background image with seamless transitions
+        """
+        if not inpainted_images:
+            return Image.new('RGB', target_size, (128, 128, 128))
+        
+        # Blend width for seamless transitions
+        blend_width = min(50, target_size[0] // 20, target_size[1] // 20)
+        
+        if arrangement == 'horizontal':
+            # Calculate individual image size with overlap
+            base_width = target_size[0] // len(inpainted_images)
+            img_width = base_width + blend_width  # Extra width for blending
+            img_height = target_size[1]
+            
+            # Create combined image
+            combined = Image.new('RGB', target_size, (0, 0, 0))
+            
+            for i, img in enumerate(inpainted_images):
+                # Resize image to fit with blend overlap
+                resized = img.convert('RGB').resize((img_width, img_height), Image.Resampling.LANCZOS)
                 
-                root = tk.Tk()
-                root.withdraw()  # Hide the window
+                # Calculate position (overlap with previous image)
+                x_pos = i * base_width - (blend_width if i > 0 else 0)
+                x_pos = max(0, x_pos)  # Don't go negative
                 
-                screen_width = root.winfo_screenwidth()
-                screen_height = root.winfo_screenheight()
-                
-                root.destroy()
-                
-                # Validate reasonable screen dimensions
-                if screen_width > 0 and screen_height > 0 and screen_width <= 16384 and screen_height <= 16384:
-                    return screen_width, screen_height
+                if i == 0:
+                    # First image - paste directly
+                    combined.paste(resized, (x_pos, 0))
                 else:
-                    print(f"⚠️  Invalid screen dimensions detected: {screen_width}x{screen_height}")
-                    return 1920, 1080
+                    # Create blend mask for left edge
+                    mask = self.create_seamless_blend_mask((img_width, img_height), 'horizontal', blend_width)
                     
-            except Exception as e:
-                print(f"⚠️  tkinter screen detection failed: {str(e)}")
+                    # Composite with blending
+                    combined.paste(resized, (x_pos, 0), mask)
+            
+            return combined
+            
+        elif arrangement == 'vertical':
+            # Calculate individual image size with overlap
+            base_height = target_size[1] // len(inpainted_images)
+            img_width = target_size[0]
+            img_height = base_height + blend_width  # Extra height for blending
+            
+            # Create combined image
+            combined = Image.new('RGB', target_size, (0, 0, 0))
+            
+            for i, img in enumerate(inpainted_images):
+                # Resize image to fit with blend overlap
+                resized = img.convert('RGB').resize((img_width, img_height), Image.Resampling.LANCZOS)
+                
+                # Calculate position (overlap with previous image)
+                y_pos = i * base_height - (blend_width if i > 0 else 0)
+                y_pos = max(0, y_pos)  # Don't go negative
+                
+                if i == 0:
+                    # First image - paste directly
+                    combined.paste(resized, (0, y_pos))
+                else:
+                    # Create blend mask for top edge
+                    mask = self.create_seamless_blend_mask((img_width, img_height), 'vertical', blend_width)
+                    
+                    # Composite with blending
+                    combined.paste(resized, (0, y_pos), mask)
+            
+            return combined
+            
+        elif arrangement == 'grid':
+            # Calculate grid dimensions
+            num_images = len(inpainted_images)
+            grid_cols = math.ceil(math.sqrt(num_images))
+            grid_rows = math.ceil(num_images / grid_cols)
+            
+            # Calculate individual image size with overlap
+            base_width = target_size[0] // grid_cols
+            base_height = target_size[1] // grid_rows
+            img_width = base_width + blend_width
+            img_height = base_height + blend_width
+            
+            # Create combined image
+            combined = Image.new('RGB', target_size, (0, 0, 0))
+            
+            for i, img in enumerate(inpainted_images):
+                row = i // grid_cols
+                col = i % grid_cols
+                
+                # Resize image to fit with blend overlap
+                resized = img.convert('RGB').resize((img_width, img_height), Image.Resampling.LANCZOS)
+                
+                # Calculate position with overlap
+                x_pos = col * base_width - (blend_width if col > 0 else 0)
+                y_pos = row * base_height - (blend_width if row > 0 else 0)
+                x_pos = max(0, x_pos)
+                y_pos = max(0, y_pos)
+                
+                if row == 0 and col == 0:
+                    # Top-left image - paste directly
+                    combined.paste(resized, (x_pos, y_pos))
+                else:
+                    # Create appropriate blend mask
+                    mask = Image.new('L', (img_width, img_height), 255)
+                    
+                    if col > 0:
+                        # Blend left edge
+                        left_mask = self.create_seamless_blend_mask((img_width, img_height), 'horizontal', blend_width)
+                        mask = ImageOps.multiply(mask, left_mask)
+                    
+                    if row > 0:
+                        # Blend top edge
+                        top_mask = self.create_seamless_blend_mask((img_width, img_height), 'vertical', blend_width)
+                        mask = ImageOps.multiply(mask, top_mask)
+                    
+                    # Composite with blending
+                    combined.paste(resized, (x_pos, y_pos), mask)
+            
+            return combined
         
-        # Method 2: Try xrandr on Linux
-        if os.name == 'posix':
-            try:
-                import subprocess
-                result = subprocess.run(['xrandr'], capture_output=True, text=True, timeout=5)
-                if result.returncode == 0:
-                    for line in result.stdout.split('\n'):
-                        if '*' in line and '+' in line:  # Current resolution line
-                            parts = line.split()
-                            for part in parts:
-                                if 'x' in part and part.replace('x', '').replace('.', '').isdigit():
-                                    try:
-                                        w, h = part.split('x')
-                                        width, height = int(float(w)), int(float(h.split('.')[0]))
-                                        if width > 0 and height > 0:
-                                            print(f"📺 Detected resolution via xrandr: {width}x{height}")
-                                            return width, height
-                                    except:
-                                        continue
-            except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
-                pass
-        
-        # Method 3: Try system_profiler on macOS
-        if sys.platform == 'darwin':
-            try:
-                import subprocess
-                result = subprocess.run(['system_profiler', 'SPDisplaysDataType'], 
-                                      capture_output=True, text=True, timeout=10)
-                if result.returncode == 0:
-                    lines = result.stdout.split('\n')
-                    for i, line in enumerate(lines):
-                        if 'Resolution:' in line:
-                            # Look for resolution pattern like "2560 x 1440"
-                            import re
-                            match = re.search(r'(\d+)\s*x\s*(\d+)', line)
-                            if match:
-                                width, height = int(match.group(1)), int(match.group(2))
-                                print(f"📺 Detected resolution via system_profiler: {width}x{height}")
-                                return width, height
-            except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
-                pass
-        
-        # Method 4: Environment variable fallback
-        if 'SCREEN_WIDTH' in os.environ and 'SCREEN_HEIGHT' in os.environ:
-            try:
-                width = int(os.environ['SCREEN_WIDTH'])
-                height = int(os.environ['SCREEN_HEIGHT'])
-                if width > 0 and height > 0:
-                    print(f"📺 Using environment variables: {width}x{height}")
-                    return width, height
-            except ValueError:
-                pass
-        
-        # Final fallback
-        print("⚠️  Could not detect screen resolution, using Full HD (1920x1080)")
-        return 1920, 1080
-
-    @staticmethod
-    def get_resolution_presets() -> dict:
-        """Get common resolution presets with descriptions"""
-        return {
-            'auto': 'Auto-detect screen size',
-            'hd': {'width': 1280, 'height': 720, 'desc': 'HD (1280x720)'},
-            'fhd': {'width': 1920, 'height': 1080, 'desc': 'Full HD (1920x1080)'},
-            'qhd': {'width': 2560, 'height': 1440, 'desc': '2K QHD (2560x1440)'},
-            '4k': {'width': 3840, 'height': 2160, 'desc': '4K UHD (3840x2160)'},
-            '5k': {'width': 5120, 'height': 2880, 'desc': '5K (5120x2880)'},
-            '8k': {'width': 7680, 'height': 4320, 'desc': '8K (7680x4320)'},
-            'mobile_portrait': {'width': 1080, 'height': 1920, 'desc': 'Mobile Portrait (1080x1920)'},
-            'mobile_landscape': {'width': 1920, 'height': 1080, 'desc': 'Mobile Landscape (1920x1080)'},
-            'ultrawide': {'width': 3440, 'height': 1440, 'desc': 'Ultrawide (3440x1440)'},
-            'cinema': {'width': 4096, 'height': 2160, 'desc': 'Cinema 4K (4096x2160)'},
-            'instagram_square': {'width': 1080, 'height': 1080, 'desc': 'Instagram Square (1080x1080)'},
-            'instagram_story': {'width': 1080, 'height': 1920, 'desc': 'Instagram Story (1080x1920)'}
-        }
-
-    def choose_max_dimensions(self, preset: str = 'auto', custom_width: Optional[int] = None, 
-                            custom_height: Optional[int] = None) -> Tuple[int, int]:
-        """Choose maximum dimensions based on screen size or preset"""
-        presets = self.get_resolution_presets()
-        
-        if custom_width and custom_height:
-            return custom_width, custom_height
-        
-        if preset == 'auto':
-            return self.get_screen_resolution()
-        
-        elif preset in presets and preset != 'auto':
-            preset_info = presets[preset]
-            return preset_info['width'], preset_info['height']
-        
-        else:
-            print(f"⚠️  Unknown preset '{preset}', using auto-detection")
-            return self.get_screen_resolution()
-
-class SeamlessBlender:
-    """Handles generative fill and seamless blending operations"""
+        return inpainted_images[0].convert('RGB').resize(target_size, Image.Resampling.LANCZOS)
     
-    @staticmethod
-    def create_blend_mask(img1: np.ndarray, img2: np.ndarray, overlap_width: int = 50, 
-                         blend_type: str = 'linear') -> np.ndarray:
-        """Create a blending mask for seamless transition between two images"""
-        h1, w1 = img1.shape[:2]
-        h2, w2 = img2.shape[:2]
+    def create_texture_background(self, inpainted_images: List[Image.Image], target_size: tuple) -> Image.Image:
+        """
+        Create seamless texture background from inpainted images.
         
-        if blend_type == 'linear':
-            mask = np.zeros((max(h1, h2), overlap_width), dtype=np.float32)
-            for i in range(overlap_width):
-                mask[:, i] = i / (overlap_width - 1)
-        
-        elif blend_type == 'gaussian':
-            mask = np.zeros((max(h1, h2), overlap_width), dtype=np.float32)
-            center = overlap_width // 2
-            sigma = overlap_width / 6
-            for i in range(overlap_width):
-                gaussian_val = np.exp(-((i - center) ** 2) / (2 * sigma ** 2))
-                mask[:, i] = gaussian_val
-        
-        else:  # linear default
-            mask = np.zeros((max(h1, h2), overlap_width), dtype=np.float32)
-            for i in range(overlap_width):
-                mask[:, i] = i / (overlap_width - 1)
-        
-        return mask
-
-    @staticmethod
-    def apply_alpha_blending(img1: np.ndarray, img2: np.ndarray, mask: np.ndarray, 
-                           overlap_region: Tuple[int, int, int, int]) -> np.ndarray:
-        """Apply alpha blending in the overlap region"""
-        x, y, w, h = overlap_region
-        
-        region1 = img1[y:y+h, x:x+w]
-        region2 = img2[y:y+h, x:x+w]
-        
-        if mask.shape[:2] != (h, w):
-            mask_resized = cv2.resize(mask, (w, h))
-        else:
-            mask_resized = mask
-        
-        if len(mask_resized.shape) == 2:
-            mask_resized = cv2.merge([mask_resized, mask_resized, mask_resized])
-        
-        mask_resized = mask_resized.astype(np.float32) / 255.0
-        
-        blended_region = (region1.astype(np.float32) * (1 - mask_resized) + 
-                         region2.astype(np.float32) * mask_resized)
-        
-        result = img1.copy()
-        result[y:y+h, x:x+w] = blended_region.astype(np.uint8)
-        
-        return result
-
-    @staticmethod
-    def generative_fill_inpaint(image: np.ndarray, mask_region: np.ndarray, 
-                              method: str = 'telea') -> np.ndarray:
-        """Apply inpainting to fill gaps and create smooth transitions"""
-        if len(mask_region.shape) == 3:
-            mask_region = cv2.cvtColor(mask_region, cv2.COLOR_BGR2GRAY)
-        
-        if method == 'telea':
-            result = cv2.inpaint(image, mask_region, 3, cv2.INPAINT_TELEA)
-        else:  # ns
-            result = cv2.inpaint(image, mask_region, 3, cv2.INPAINT_NS)
-        
-        return result
-
-    def combine_horizontal_with_fill(self, images: List[np.ndarray], 
-                                   use_generative_fill: bool = True) -> np.ndarray:
-        """Combine images horizontally with seamless blending"""
-        if not use_generative_fill:
-            min_height = min(img.shape[0] for img in images)
-            resized_images = []
-            for img in images:
-                h, w = img.shape[:2]
-                new_w = int(w * min_height / h)
-                resized_img = cv2.resize(img, (new_w, min_height))
-                resized_images.append(resized_img)
-            return np.hstack(resized_images)
-        
-        print("🎨 Applying generative fill for horizontal combination...")
-        
-        min_height = min(img.shape[0] for img in images)
-        resized_images = []
-        for img in images:
-            h, w = img.shape[:2]
-            new_w = int(w * min_height / h)
-            resized_img = cv2.resize(img, (new_w, min_height))
-            resized_images.append(resized_img)
-        
-        result = resized_images[0].copy()
-        overlap_width = 100
-        
-        for i in range(1, len(resized_images)):
-            current_img = resized_images[i]
-            h, w = current_img.shape[:2]
+        Args:
+            inpainted_images: List of inpainted background images
+            target_size: (width, height) for output
             
-            new_width = result.shape[1] + w - overlap_width
-            expanded = np.zeros((h, new_width, 3), dtype=np.uint8)
-            
-            expanded[:, :result.shape[1]] = result
-            
-            overlap_start = result.shape[1] - overlap_width
-            overlap_end = result.shape[1]
-            
-            overlap_existing = result[:, overlap_start:overlap_end]
-            overlap_new = current_img[:, :overlap_width]
-            
-            blend_mask = self.create_blend_mask(overlap_existing, overlap_new, overlap_width, 'gaussian')
-            
-            blended_overlap = self.apply_alpha_blending(
-                overlap_existing, overlap_new, 
-                (blend_mask * 255).astype(np.uint8),
-                (0, 0, overlap_width, h)
-            )
-            
-            expanded[:, overlap_start:overlap_end] = blended_overlap
-            expanded[:, overlap_end:overlap_end + w - overlap_width] = current_img[:, overlap_width:]
-            
-            inpaint_mask = np.zeros((h, new_width), dtype=np.uint8)
-            inpaint_mask[:, overlap_start-10:overlap_end+10] = 255
-            
-            expanded = self.generative_fill_inpaint(expanded, inpaint_mask, 'telea')
-            
-            result = expanded
-            print(f"   ✓ Blended image {i+1}/{len(resized_images)}")
+        Returns:
+            Texture-based background image
+        """
+        if not inpainted_images:
+            return Image.new('RGB', target_size, (128, 128, 128))
         
-        return result
-
-    def combine_vertical_with_fill(self, images: List[np.ndarray], 
-                                 use_generative_fill: bool = True) -> np.ndarray:
-        """Combine images vertically with seamless blending"""
-        if not use_generative_fill:
-            min_width = min(img.shape[1] for img in images)
-            resized_images = []
-            for img in images:
-                h, w = img.shape[:2]
-                new_h = int(h * min_width / w)
-                resized_img = cv2.resize(img, (min_width, new_h))
-                resized_images.append(resized_img)
-            return np.vstack(resized_images)
+        # Use first image as base texture
+        base_img = inpainted_images[0].convert('RGB')
         
-        print("🎨 Applying generative fill for vertical combination...")
+        # Create tileable texture
+        tile_size = min(base_img.size[0], base_img.size[1], 256)
         
-        min_width = min(img.shape[1] for img in images)
-        resized_images = []
-        for img in images:
-            h, w = img.shape[:2]
-            new_h = int(h * min_width / w)
-            resized_img = cv2.resize(img, (min_width, new_h))
-            resized_images.append(resized_img)
+        # Extract central square as tile
+        center_x = base_img.size[0] // 2
+        center_y = base_img.size[1] // 2
+        left = center_x - tile_size // 2
+        top = center_y - tile_size // 2
+        tile = base_img.crop((left, top, left + tile_size, top + tile_size))
         
-        result = resized_images[0].copy()
-        overlap_height = 100
+        # Create tiled background
+        combined = Image.new('RGB', target_size, (0, 0, 0))
         
-        for i in range(1, len(resized_images)):
-            current_img = resized_images[i]
-            h, w = current_img.shape[:2]
-            
-            new_height = result.shape[0] + h - overlap_height
-            expanded = np.zeros((new_height, w, 3), dtype=np.uint8)
-            
-            expanded[:result.shape[0], :] = result
-            
-            overlap_start = result.shape[0] - overlap_height
-            overlap_end = result.shape[0]
-            
-            overlap_existing = result[overlap_start:overlap_end, :]
-            overlap_new = current_img[:overlap_height, :]
-            
-            blend_mask = self.create_blend_mask(overlap_existing, overlap_new, overlap_height, 'gaussian')
-            blend_mask = np.transpose(blend_mask, (1, 0))
-            
-            blended_overlap = self.apply_alpha_blending(
-                overlap_existing, overlap_new, 
-                (blend_mask * 255).astype(np.uint8),
-                (0, 0, w, overlap_height)
-            )
-            
-            expanded[overlap_start:overlap_end, :] = blended_overlap
-            expanded[overlap_end:overlap_end + h - overlap_height, :] = current_img[overlap_height:, :]
-            
-            inpaint_mask = np.zeros((new_height, w), dtype=np.uint8)
-            inpaint_mask[overlap_start-10:overlap_end+10, :] = 255
-            
-            expanded = self.generative_fill_inpaint(expanded, inpaint_mask, 'telea')
-            
-            result = expanded
-            print(f"   ✓ Blended image {i+1}/{len(resized_images)}")
+        for x in range(0, target_size[0], tile_size):
+            for y in range(0, target_size[1], tile_size):
+                combined.paste(tile, (x, y))
         
-        return result
-
-    def combine_grid_with_fill(self, images: List[np.ndarray], 
-                             use_generative_fill: bool = True) -> np.ndarray:
-        """Combine images in grid layout with seamless blending"""
-        num_images = len(images)
-        grid_cols = int(np.ceil(np.sqrt(num_images)))
-        grid_rows = int(np.ceil(num_images / grid_cols))
-        
-        avg_height = int(np.mean([img.shape[0] for img in images]))
-        avg_width = int(np.mean([img.shape[1] for img in images]))
-        
-        resized_images = []
-        for img in images:
-            resized_img = cv2.resize(img, (avg_width, avg_height))
-            resized_images.append(resized_img)
-        
-        while len(resized_images) < grid_rows * grid_cols:
-            black_img = np.zeros((avg_height, avg_width, 3), dtype=np.uint8)
-            resized_images.append(black_img)
-        
-        if not use_generative_fill:
-            rows = []
-            for i in range(grid_rows):
-                start_idx = i * grid_cols
-                end_idx = start_idx + grid_cols
-                row_images = resized_images[start_idx:end_idx]
-                row = np.hstack(row_images)
-                rows.append(row)
-            return np.vstack(rows)
-        
-        print("🎨 Applying generative fill for grid combination...")
-        
-        rows = []
-        for i in range(grid_rows):
-            start_idx = i * grid_cols
-            end_idx = start_idx + grid_cols
-            row_images = resized_images[start_idx:end_idx]
-            row = self.combine_horizontal_with_fill(row_images, True)
-            rows.append(row)
-        
-        result = self.combine_vertical_with_fill(rows, True)
-        return result
-
-class BackgroundCombiner:
-    """Main class for combining backgrounds with advanced options"""
+        return combined
     
-    def __init__(self):
-        self.processor = BackgroundProcessor()
-        self.resolution_manager = ResolutionManager()
-        self.blender = SeamlessBlender()
-
-    def combine_backgrounds(self, background_path: str, output_path: str, 
-                          arrangement: str = 'horizontal', resolution_preset: str = 'auto',
-                          custom_width: Optional[int] = None, custom_height: Optional[int] = None,
-                          generative_fill: bool = True, maintain_aspect_ratio: bool = True) -> bool:
-        """Combine multiple background images into a single contiguous image"""
+    
+    def create_gradient_background(self, inpainted_images: List[Image.Image], target_size: tuple) -> Image.Image:
+        """
+        Create gradient background based on dominant colors from images.
         
-        try:
-            # Get image files
-            bg_files = self.processor.get_image_files(background_path)
-            print(f"📁 Found {len(bg_files)} background images")
+        Args:
+            inpainted_images: List of inpainted background images
+            target_size: (width, height) for output
             
-            # Get target dimensions
-            max_width, max_height = self.resolution_manager.choose_max_dimensions(
-                resolution_preset, custom_width, custom_height)
-            print(f"🎯 Target resolution: {max_width}x{max_height}")
+        Returns:
+            Gradient-based background image
+        """
+        if not inpainted_images:
+            return Image.new('RGB', target_size, (128, 128, 128))
+        
+        # Extract dominant colors from images
+        colors = []
+        for img in inpainted_images:
+            # Resize for faster processing
+            small_img = img.convert('RGB').resize((50, 50), Image.Resampling.LANCZOS)
+            pixels = list(small_img.getdata())
             
-            # Load and resize images
-            images = self._load_and_resize_images(bg_files, arrangement, max_width, max_height, 
-                                                maintain_aspect_ratio)
+            # Calculate average color
+            avg_r = sum(p[0] for p in pixels) // len(pixels)
+            avg_g = sum(p[1] for p in pixels) // len(pixels)
+            avg_b = sum(p[2] for p in pixels) // len(pixels)
+            colors.append((avg_r, avg_g, avg_b))
+        
+        # Create gradient between colors
+        combined = Image.new('RGB', target_size, (0, 0, 0))
+        draw = ImageDraw.Draw(combined)
+        
+        if len(colors) == 1:
+            # Single color with slight gradient
+            color = colors[0]
+            for y in range(target_size[1]):
+                brightness = 0.7 + 0.3 * (y / target_size[1])
+                line_color = tuple(int(c * brightness) for c in color)
+                draw.line([(0, y), (target_size[0], y)], fill=line_color)
+        else:
+            # Multi-color gradient
+            for y in range(target_size[1]):
+                progress = y / target_size[1]
+                color_index = progress * (len(colors) - 1)
+                color_idx = int(color_index)
+                color_blend = color_index - color_idx
+                
+                if color_idx >= len(colors) - 1:
+                    line_color = colors[-1]
+                else:
+                    # Blend between two colors
+                    c1 = colors[color_idx]
+                    c2 = colors[color_idx + 1]
+                    line_color = tuple(
+                        int(c1[i] * (1 - color_blend) + c2[i] * color_blend)
+                        for i in range(3)
+                    )
+                
+                draw.line([(0, y), (target_size[0], y)], fill=line_color)
+        
+        return combined
+    
+    def create_combined_background(self, inpainted_images: List[Image.Image], background_type: str, arrangement: str, target_size: tuple, debug_dir: Path = None) -> Image.Image:
+        """
+        Create combined background using specified type and parameters.
+        
+        Args:
+            inpainted_images: List of inpainted background images
+            background_type: Type of background to create
+            arrangement: Arrangement for concatenation mode
+            target_size: (width, height) for output
+            debug_dir: Optional directory to save debug output
             
-            if not images:
-                print("❌ No valid images to combine")
-                return False
+        Returns:
+            Combined background image
+        """
+        print(f"\nStep 4: Creating {background_type} background ({target_size[0]}x{target_size[1]})...")
+        
+        # Determine background type
+        actual_type = self.determine_background_type(inpainted_images, background_type)
+        if actual_type != background_type:
+            print(f"  Auto-determined type: {actual_type}")
+        
+        # Create background based on type
+        if actual_type == 'concat':
+            combined = self.create_concatenated_background(inpainted_images, arrangement, target_size)
+        elif actual_type == 'texture':
+            combined = self.create_texture_background(inpainted_images, target_size)
+        elif actual_type == 'gradient':
+            combined = self.create_gradient_background(inpainted_images, target_size)
+        else:
+            # Fallback to concatenation
+            combined = self.create_concatenated_background(inpainted_images, arrangement, target_size)
+        
+        # Save debug output if requested
+        if debug_dir and self.debug:
+            debug_path = debug_dir / f"step4_combined_{actual_type}_background.png"
+            combined.save(debug_path)
+            print(f"  Debug: Saved combined background to {debug_path}")
+        
+        print(f"Step 4 complete: {actual_type} background created")
+        return combined
+    
+    def get_subject_bounding_box(self, foreground_image: Image.Image) -> tuple:
+        """
+        Get bounding box of the subject in a foreground image (ignoring transparent pixels).
+        
+        Args:
+            foreground_image: PIL Image with transparent background
             
-            # Combine images based on arrangement
-            if arrangement == 'horizontal':
-                combined = self.blender.combine_horizontal_with_fill(images, generative_fill)
-            elif arrangement == 'vertical':
-                combined = self.blender.combine_vertical_with_fill(images, generative_fill)
-            elif arrangement == 'grid':
-                combined = self.blender.combine_grid_with_fill(images, generative_fill)
+        Returns:
+            (left, top, right, bottom) bounding box of the subject
+        """
+        if foreground_image.mode != 'RGBA':
+            foreground_image = foreground_image.convert('RGBA')
+        
+        # Get alpha channel
+        alpha = foreground_image.split()[-1]
+        
+        # Find bounding box of non-transparent pixels
+        bbox = alpha.getbbox()
+        
+        # Return bbox or full image bounds if no transparency found
+        if bbox is None:
+            return (0, 0, foreground_image.size[0], foreground_image.size[1])
+        
+        return bbox
+    
+    def calculate_subject_positions(self, foreground_images: List[Image.Image], background_size: tuple, arrangement: str = 'horizontal') -> List[tuple]:
+        """
+        Calculate evenly spaced positions for subjects based on their bounding boxes.
+        
+        Args:
+            foreground_images: List of foreground images with subjects
+            background_size: (width, height) of the background
+            arrangement: 'horizontal' or 'vertical' spacing
+            
+        Returns:
+            List of (x, y) positions for each subject
+        """
+        if not foreground_images:
+            return []
+        
+        positions = []
+        subject_boxes = []
+        
+        # Get bounding boxes for all subjects
+        for img in foreground_images:
+            bbox = self.get_subject_bounding_box(img)
+            subject_width = bbox[2] - bbox[0]
+            subject_height = bbox[3] - bbox[1]
+            subject_boxes.append((bbox, subject_width, subject_height))
+        
+        if arrangement == 'horizontal':
+            # Calculate horizontal spacing
+            total_subject_width = sum(box[1] for box in subject_boxes)
+            available_width = background_size[0]
+            
+            if len(foreground_images) > 1:
+                spacing = (available_width - total_subject_width) / (len(foreground_images) + 1)
             else:
-                print(f"❌ Unknown arrangement: {arrangement}")
-                return False
+                spacing = (available_width - total_subject_width) / 2
             
-            # Final resize if needed
-            if combined.shape[1] > max_width or combined.shape[0] > max_height:
-                print(f"📐 Resizing final image to fit within {max_width}x{max_height}")
-                
-                if maintain_aspect_ratio:
-                    scale_w = max_width / combined.shape[1]
-                    scale_h = max_height / combined.shape[0]
-                    scale = min(scale_w, scale_h)
-                    
-                    final_width = int(combined.shape[1] * scale)
-                    final_height = int(combined.shape[0] * scale)
-                else:
-                    final_width = max_width
-                    final_height = max_height
-                
-                combined = cv2.resize(combined, (final_width, final_height))
+            current_x = spacing
             
-            # Ensure output directory exists with proper permissions
-            output_dir = Path(output_path).parent
-            try:
-                output_dir.mkdir(parents=True, exist_ok=True)
+            for i, (bbox, subject_width, subject_height) in enumerate(subject_boxes):
+                # Center vertically, position horizontally with spacing
+                x = current_x - bbox[0]  # Adjust for bbox offset
+                y = (background_size[1] - subject_height) // 2 - bbox[1]  # Center vertically, adjust for bbox offset
                 
-                # Test write permissions
-                test_file = output_dir / '.write_test'
+                positions.append((int(x), int(y)))
+                current_x += subject_width + spacing
+                
+        elif arrangement == 'vertical':
+            # Calculate vertical spacing
+            total_subject_height = sum(box[2] for box in subject_boxes)
+            available_height = background_size[1]
+            
+            if len(foreground_images) > 1:
+                spacing = (available_height - total_subject_height) / (len(foreground_images) + 1)
+            else:
+                spacing = (available_height - total_subject_height) / 2
+            
+            current_y = spacing
+            
+            for i, (bbox, subject_width, subject_height) in enumerate(subject_boxes):
+                # Center horizontally, position vertically with spacing
+                x = (background_size[0] - subject_width) // 2 - bbox[0]  # Center horizontally, adjust for bbox offset
+                y = current_y - bbox[1]  # Adjust for bbox offset
+                
+                positions.append((int(x), int(y)))
+                current_y += subject_height + spacing
+        
+        else:
+            # Default to horizontal if arrangement not recognized
+            return self.calculate_subject_positions(foreground_images, background_size, 'horizontal')
+        
+        return positions
+    
+    def compose_final_image(self, background: Image.Image, foreground_images: List[Image.Image], arrangement: str = 'horizontal', debug_dir: Path = None) -> Image.Image:
+        """
+        Compose final image by placing foreground subjects on background with even spacing.
+        
+        Args:
+            background: Combined background image
+            foreground_images: List of foreground images with subjects
+            arrangement: How to arrange subjects ('horizontal' or 'vertical')
+            debug_dir: Optional directory to save debug output
+            
+        Returns:
+            Final composite image
+        """
+        print(f"\nStep 5: Composing final image with {len(foreground_images)} subjects...")
+        
+        if not foreground_images:
+            return background
+        
+        # Create final composite
+        final_image = background.copy()
+        
+        # Calculate positions for subjects
+        positions = self.calculate_subject_positions(foreground_images, background.size, arrangement)
+        
+        # Composite each subject onto the background
+        for i, (fg_image, position) in enumerate(zip(foreground_images, positions)):
+            print(f"  Placing subject {i+1}/{len(foreground_images)} at position {position}")
+            
+            # Ensure foreground image has alpha channel
+            if fg_image.mode != 'RGBA':
+                fg_image = fg_image.convert('RGBA')
+            
+            # Paste foreground onto final image using alpha channel as mask
+            final_image.paste(fg_image, position, fg_image)
+            
+            # Save debug output if requested
+            if debug_dir and self.debug:
+                # Save individual subject bounding box visualization
+                debug_img = fg_image.copy()
+                bbox = self.get_subject_bounding_box(fg_image)
+                draw = ImageDraw.Draw(debug_img)
+                draw.rectangle(bbox, outline=(255, 0, 0, 255), width=2)
+                
+                debug_path = debug_dir / f"step5_subject_{i+1}_bbox.png"
+                debug_img.save(debug_path)
+                print(f"    Debug: Saved subject bbox to {debug_path}")
+        
+        # Save debug output for final composite
+        if debug_dir and self.debug:
+            debug_path = debug_dir / "step5_final_composite.png"
+            final_image.save(debug_path)
+            print(f"  Debug: Saved final composite to {debug_path}")
+        
+        print(f"Step 5 complete: Final composite created with {arrangement} arrangement")
+        return final_image
+    
+    def resize_to_fit(self, image: Image.Image, target_width: int = None, target_height: int = None, debug_dir: Path = None) -> Image.Image:
+        """
+        Resize image to fit specified width or height while maintaining aspect ratio.
+        
+        Args:
+            image: Input image to resize
+            target_width: Target width (if specified)
+            target_height: Target height (if specified)
+            debug_dir: Optional directory to save debug output
+            
+        Returns:
+            Resized image maintaining aspect ratio
+        """
+        print(f"\nStep 6: Resizing final composite to fit target dimensions...")
+        
+        current_width, current_height = image.size
+        current_aspect_ratio = current_width / current_height
+        
+        if target_width and target_height:
+            # Both specified - use as-is (shouldn't happen in this context)
+            new_width, new_height = target_width, target_height
+        elif target_width:
+            # Width specified - calculate height maintaining aspect ratio
+            new_width = target_width
+            new_height = int(target_width / current_aspect_ratio)
+            print(f"  Resizing to width {new_width}, calculated height {new_height}")
+        elif target_height:
+            # Height specified - calculate width maintaining aspect ratio
+            new_height = target_height
+            new_width = int(target_height * current_aspect_ratio)
+            print(f"  Resizing to calculated width {new_width}, height {new_height}")
+        else:
+            # Neither specified - return original
+            return image
+        
+        # Resize image
+        resized_image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+        
+        # Save debug output if requested
+        if debug_dir and self.debug:
+            debug_path = debug_dir / f"step6_resized_{new_width}x{new_height}.png"
+            resized_image.save(debug_path)
+            print(f"  Debug: Saved resized image to {debug_path}")
+        
+        print(f"Step 6 complete: Resized from {current_width}x{current_height} to {new_width}x{new_height}")
+        return resized_image
+    
+    def combine_images(self, image_paths: List[Path], output_path: str, **kwargs) -> None:
+        """
+        Combine multiple images into a single composite.
+        
+        Args:
+            image_paths: List of Path objects for input images
+            output_path: Output file path for combined image
+            **kwargs: Additional parameters for combination process
+        """
+        output_dir = Path(output_path).parent
+        debug_dir = None
+        
+        if self.debug:
+            debug_dir = output_dir / "debug"
+            debug_dir.mkdir(exist_ok=True)
+            print(f"Debug mode enabled: outputs will be saved to {debug_dir}")
+        
+        # Step 1: Remove backgrounds
+        processed_images = self.remove_backgrounds(image_paths, debug_dir)
+        
+        # Step 2: Extract backgrounds using masks
+        background_images = self.extract_backgrounds(image_paths, processed_images, debug_dir)
+        
+        # Step 3: Inpaint backgrounds to fill gaps
+        inpainted_images = self.inpaint_backgrounds(background_images, processed_images, debug_dir)
+        
+        # Step 4: Create combined background
+        # Determine target size with proper fallbacks
+        specified_width = kwargs.get('width')
+        specified_height = kwargs.get('height')
+        
+        # Default size for composition
+        default_width, default_height = 1920, 1080
+        
+        # Handle resolution parameter if provided
+        resolution = kwargs.get('resolution')
+        if resolution:
+            if resolution.lower() == 'hd':
+                default_width, default_height = 1280, 720
+            elif resolution.lower() == 'fhd' or resolution.lower() == '1080p':
+                default_width, default_height = 1920, 1080
+            elif resolution.lower() == 'qhd' or resolution.lower() == '1440p':
+                default_width, default_height = 2560, 1440
+            elif resolution.lower() == '4k':
+                default_width, default_height = 3840, 2160
+            elif 'x' in resolution.lower():
+                # Parse custom resolution like "1920x1080"
                 try:
-                    test_file.touch()
-                    test_file.unlink()
-                except PermissionError:
-                    raise PermissionError(f"No write permission for output directory: {output_dir}")
-                    
-            except OSError as e:
-                raise OSError(f"Cannot create output directory {output_dir}: {str(e)}")
-            
-            # Save combined image
-            success = cv2.imwrite(output_path, combined)
-            
-            if success:
-                print(f"✅ Combined image saved: {output_path}")
-                print(f"📏 Final image shape: {combined.shape}")
-                return True
-            else:
-                print(f"❌ Failed to save combined image")
-                return False
-                
-        except Exception as e:
-            print(f"❌ Error combining backgrounds: {str(e)}")
-            return False
-
-    def _load_and_resize_images(self, bg_files: List[str], arrangement: str, 
-                              max_width: int, max_height: int, maintain_aspect_ratio: bool) -> List[np.ndarray]:
-        """Load and resize images based on arrangement and target resolution"""
-        images = []
+                    w, h = resolution.lower().split('x')
+                    default_width, default_height = int(w), int(h)
+                except ValueError:
+                    print(f"Warning: Invalid resolution format '{resolution}', using defaults")
         
-        for bg_file in bg_files:
-            img = cv2.imread(bg_file)
-            if img is not None:
-                # Resize based on arrangement and target resolution
-                if arrangement == 'horizontal':
-                    target_height = min(max_height, img.shape[0])
-                    if maintain_aspect_ratio:
-                        scale = target_height / img.shape[0]
-                        target_width = int(img.shape[1] * scale)
-                        max_width_per_image = max_width // len(bg_files)
-                        if target_width > max_width_per_image:
-                            scale = max_width_per_image / img.shape[1]
-                            target_width = max_width_per_image
-                            target_height = int(img.shape[0] * scale)
-                    else:
-                        target_width = max_width // len(bg_files)
-                    
-                    img = cv2.resize(img, (target_width, target_height))
-                    
-                elif arrangement == 'vertical':
-                    target_width = min(max_width, img.shape[1])
-                    if maintain_aspect_ratio:
-                        scale = target_width / img.shape[1]
-                        target_height = int(img.shape[0] * scale)
-                        max_height_per_image = max_height // len(bg_files)
-                        if target_height > max_height_per_image:
-                            scale = max_height_per_image / img.shape[0]
-                            target_height = max_height_per_image
-                            target_width = int(img.shape[1] * scale)
-                    else:
-                        target_height = max_height // len(bg_files)
-                    
-                    img = cv2.resize(img, (target_width, target_height))
-                    
-                else:  # grid
-                    num_images = len(bg_files)
-                    grid_cols = int(np.ceil(np.sqrt(num_images)))
-                    grid_rows = int(np.ceil(num_images / grid_cols))
-                    
-                    target_width = max_width // grid_cols
-                    target_height = max_height // grid_rows
-                    
-                    if maintain_aspect_ratio:
-                        scale_w = target_width / img.shape[1]
-                        scale_h = target_height / img.shape[0]
-                        scale = min(scale_w, scale_h)
-                        
-                        new_width = int(img.shape[1] * scale)
-                        new_height = int(img.shape[0] * scale)
-                        img = cv2.resize(img, (new_width, new_height))
-                    else:
-                        img = cv2.resize(img, (target_width, target_height))
-                
-                images.append(img)
-                print(f"   ✓ Loaded: {Path(bg_file).name} - Shape: {img.shape}")
-        
-        return images
-
-class CLI:
-    """Command Line Interface for the Background Processing Tool"""
-    
-    def __init__(self):
-        self.processor = BackgroundProcessor()
-        self.combiner = BackgroundCombiner()
-        self.resolution_manager = ResolutionManager()
-
-    def create_parser(self) -> argparse.ArgumentParser:
-        """Create and configure the argument parser"""
-        parser = argparse.ArgumentParser(
-            description="🎨 Professional Background Removal and Seamless Combination Tool",
-            formatter_class=argparse.RawDescriptionHelpFormatter,
-            epilog="""
-Examples:
-  # Process single image
-  %(prog)s process image.jpg -o output/
-  
-  # Process directory with 4K output
-  %(prog)s process photos/ -o output/ --resolution 4k
-  
-  # Combine backgrounds horizontally with auto screen detection
-  %(prog)s combine backgrounds/ -o panorama.png --arrangement horizontal
-  
-  # Create Instagram story format
-  %(prog)s combine photos/ -o story.png --resolution instagram_story --arrangement vertical
-  
-  # Custom resolution with generative fill
-  %(prog)s combine images/ -o result.png --width 2560 --height 1440 --generative-fill
-  
-  # Show available resolution presets
-  %(prog)s list-resolutions
-            """)
-        
-        subparsers = parser.add_subparsers(dest='command', help='Available commands')
-        
-        # Process command
-        process_parser = subparsers.add_parser('process', help='Remove backgrounds and create masks')
-        process_parser.add_argument('input', help='Input image file or directory')
-        process_parser.add_argument('-o', '--output', required=True, help='Output directory')
-        process_parser.add_argument('--no-combine', action='store_true', 
-                                  help='Skip combining backgrounds')
-        process_parser.add_argument('--arrangement', choices=['horizontal', 'vertical', 'grid'],
-                                  default='horizontal', help='How to arrange combined backgrounds')
-        process_parser.add_argument('--resolution', default='auto',
-                                  help='Resolution preset (auto, hd, fhd, qhd, 4k, etc.)')
-        process_parser.add_argument('--width', type=int, help='Custom width')
-        process_parser.add_argument('--height', type=int, help='Custom height')
-        process_parser.add_argument('--no-generative-fill', action='store_true',
-                                  help='Disable generative fill for seamless blending (enabled by default)')
-        process_parser.add_argument('--generative-fill', action='store_true',
-                                  help='Enable generative fill for seamless blending (default: enabled)')
-        
-        # Combine command
-        combine_parser = subparsers.add_parser('combine', help='Combine existing background images')
-        combine_parser.add_argument('input', help='Background images file or directory')
-        combine_parser.add_argument('-o', '--output', required=True, help='Output image file')
-        combine_parser.add_argument('--arrangement', choices=['horizontal', 'vertical', 'grid'],
-                                  default='horizontal', help='How to arrange images')
-        combine_parser.add_argument('--resolution', default='auto',
-                                  help='Resolution preset (auto, hd, fhd, qhd, 4k, etc.)')
-        combine_parser.add_argument('--width', type=int, help='Custom width')
-        combine_parser.add_argument('--height', type=int, help='Custom height')
-        combine_parser.add_argument('--no-generative-fill', action='store_true',
-                                  help='Disable generative fill for seamless blending (enabled by default)')
-        combine_parser.add_argument('--generative-fill', action='store_true',
-                                  help='Enable generative fill for seamless blending (default: enabled)')
-        combine_parser.add_argument('--no-aspect-ratio', action='store_true',
-                                  help='Don\'t maintain aspect ratios')
-        
-        # List resolutions command
-        subparsers.add_parser('list-resolutions', help='Show available resolution presets')
-        
-        # Validate command
-        subparsers.add_parser('validate', help='Validate platform compatibility')
-        
-        return parser
-
-    def print_resolution_options(self):
-        """Print all available resolution presets"""
-        presets = self.resolution_manager.get_resolution_presets()
-        
-        print("\n🖥️  Available Resolution Presets:")
-        print("=" * 60)
-        
-        # Current screen info
-        screen_w, screen_h = self.resolution_manager.get_screen_resolution()
-        print(f"📱 Your Screen: {screen_w}x{screen_h}")
-        print()
-        
-        # Standard resolutions
-        print("📺 Standard Resolutions:")
-        standard = ['hd', 'fhd', 'qhd', '4k', '5k', '8k']
-        for preset in standard:
-            info = presets[preset]
-            print(f"   {preset.upper():12} - {info['desc']}")
-        
-        print()
-        
-        # Special formats
-        print("📱 Mobile & Social:")
-        mobile = ['mobile_portrait', 'mobile_landscape', 'instagram_square', 'instagram_story']
-        for preset in mobile:
-            info = presets[preset]
-            print(f"   {preset:15} - {info['desc']}")
-        
-        print()
-        
-        # Cinema formats
-        print("🎬 Cinema & Ultrawide:")
-        cinema = ['ultrawide', 'cinema']
-        for preset in cinema:
-            info = presets[preset]
-            print(f"   {preset:12} - {info['desc']}")
-        
-        print("=" * 60)
-
-    def process_images(self, args):
-        """Process images: remove backgrounds, create masks, isolate backgrounds"""
-        try:
-            # Get image files
-            image_files = self.processor.get_image_files(args.input)
-            print(f"📁 Found {len(image_files)} images to process")
-            
-            # Create output directories with proper error handling
-            output_path = Path(args.output).resolve()
-            
-            try:
-                output_path.mkdir(parents=True, exist_ok=True)
-                
-                # Test write permissions
-                test_file = output_path / '.write_test'
-                test_file.touch()
-                test_file.unlink()
-                
-            except PermissionError:
-                print(f"❌ No write permission for output directory: {output_path}")
-                return False
-            except OSError as e:
-                print(f"❌ Cannot create output directory: {str(e)}")
-                return False
-            
-            removed_bg_dir = output_path / 'removed_bg'
-            masks_dir = output_path / 'masks'
-            backgrounds_dir = output_path / 'backgrounds'
-            
-            removed_bg_dir.mkdir(exist_ok=True)
-            masks_dir.mkdir(exist_ok=True)
-            backgrounds_dir.mkdir(exist_ok=True)
-            
-            print(f"📂 Processing to: {output_path}")
-            
-            # Process each image
-            for i, image_path in enumerate(image_files):
-                try:
-                    filename = Path(image_path).name
-                    name_without_ext = Path(image_path).stem
-                    
-                    print(f"🔄 Processing {i+1}/{len(image_files)}: {filename}")
-                    
-                    # Step 1: Remove background
-                    removed_bg = self.processor.remove_background(image_path)
-                    removed_bg_path = removed_bg_dir / f"{name_without_ext}_no_bg.png"
-                    removed_bg.save(str(removed_bg_path))
-                    
-                    # Step 2: Create mask
-                    mask = self.processor.create_mask_from_removed_bg(removed_bg)
-                    mask_path = masks_dir / f"{name_without_ext}_mask.png"
-                    cv2.imwrite(str(mask_path), mask)
-                    
-                    # Step 3: Isolate background
-                    background_only = self.processor.isolate_background(image_path, mask)
-                    bg_path = backgrounds_dir / f"{name_without_ext}_background.png"
-                    cv2.imwrite(str(bg_path), background_only)
-                    
-                    print(f"   ✅ Completed: {filename}")
-                    
-                except Exception as e:
-                    print(f"   ❌ Error processing {filename}: {str(e)}")
-            
-            print("🎉 Processing complete!")
-            
-            # Combine backgrounds if requested
-            if not args.no_combine:
-                print("\n🎨 Combining backgrounds...")
-                combined_output_path = output_path / f'combined_backgrounds_{args.arrangement}.png'
-                
-                success = self.combiner.combine_backgrounds(
-                    str(backgrounds_dir),
-                    str(combined_output_path),
-                    arrangement=args.arrangement,
-                    resolution_preset=args.resolution,
-                    custom_width=args.width,
-                    custom_height=args.height,
-                    generative_fill=not args.no_generative_fill,  # Default True, disable with --no-generative-fill
-                    maintain_aspect_ratio=True
-                )
-                
-                if success:
-                    print("🎉 Background combination complete!")
-                else:
-                    print("⚠️  Background combination failed")
-            
-        except Exception as e:
-            print(f"❌ Error processing images: {str(e)}")
-            return False
-        
-        return True
-
-    def combine_backgrounds_cmd(self, args):
-        """Combine background images command"""
-        try:
-            success = self.combiner.combine_backgrounds(
-                args.input,
-                args.output,
-                arrangement=args.arrangement,
-                resolution_preset=args.resolution,
-                custom_width=args.width,
-                custom_height=args.height,
-                generative_fill=not args.no_generative_fill,
-                maintain_aspect_ratio=not args.no_aspect_ratio
-            )
-            
-            if success:
-                print("🎉 Background combination complete!")
-            else:
-                print("❌ Background combination failed")
-                
-            return success
-            
-        except Exception as e:
-            print(f"❌ Error combining backgrounds: {str(e)}")
-            return False
-
-    def run(self):
-        """Main CLI entry point"""
-        parser = self.create_parser()
-        
-        if len(sys.argv) == 1:
-            parser.print_help()
-            return
-        
-        args = parser.parse_args()
-        
-        if args.command == 'process':
-            self.process_images(args)
-            
-        elif args.command == 'combine':
-            self.combine_backgrounds_cmd(args)
-            
-        elif args.command == 'list-resolutions':
-            self.print_resolution_options()
-            
-        elif args.command == 'validate':
-            success = print_platform_info()
-            sys.exit(0 if success else 1)
-            
+        # Determine working size for composition (use defaults if single dimension specified)
+        if specified_width and specified_height:
+            # Both dimensions specified - use as-is
+            target_width, target_height = specified_width, specified_height
+            final_resize_needed = False
+        elif specified_width or specified_height:
+            # Only one dimension specified - use defaults for composition, resize later
+            target_width, target_height = default_width, default_height
+            final_resize_needed = True
         else:
-            parser.print_help()
+            # No dimensions specified - use defaults
+            target_width, target_height = default_width, default_height
+            final_resize_needed = False
+        
+        target_size = (target_width, target_height)
+        
+        combined_background = self.create_combined_background(
+            inpainted_images,
+            kwargs.get('background_type', 'auto'),
+            kwargs.get('arrangement', 'horizontal'),
+            target_size,
+            debug_dir
+        )
+        
+        # Step 5: Compose final image with subjects on background
+        final_composite = self.compose_final_image(
+            combined_background,
+            processed_images,  # Use background-removed images (foreground subjects)
+            kwargs.get('arrangement', 'horizontal'),
+            debug_dir
+        )
+        
+        # Step 6: Resize final composite if only one dimension was specified
+        if final_resize_needed:
+            final_composite = self.resize_to_fit(final_composite, specified_width, specified_height, debug_dir)
+        
+        # Save final result
+        final_composite.save(output_path)
+        print(f"\nFinal composite saved to {output_path}")
 
-def validate_platform() -> dict:
-    """Validate platform compatibility and available features"""
-    validation = {
-        'platform': sys.platform,
-        'python_version': sys.version,
-        'tkinter_available': TKINTER_AVAILABLE,
-        'display_available': True,
-        'required_modules': {},
-        'warnings': [],
-        'errors': []
-    }
-    
-    # Check if running on supported platform
-    if sys.platform not in ['linux', 'darwin', 'linux2']:
-        validation['warnings'].append(f"Platform {sys.platform} not explicitly tested")
-    
-    # Check DISPLAY on Unix systems
-    if os.name == 'posix' and 'DISPLAY' not in os.environ:
-        validation['display_available'] = False
-        validation['warnings'].append("No DISPLAY environment variable (headless system)")
-    
-    # Check required modules
-    required_modules = ['cv2', 'numpy', 'PIL', 'rembg', 'pathlib']
-    
-    for module_name in required_modules:
-        try:
-            if module_name == 'cv2':
-                import cv2
-                validation['required_modules'][module_name] = f"✅ {cv2.__version__}"
-            elif module_name == 'numpy':
-                import numpy
-                validation['required_modules'][module_name] = f"✅ {numpy.__version__}"
-            elif module_name == 'PIL':
-                from PIL import Image
-                validation['required_modules'][module_name] = f"✅ {Image.__version__}"
-            elif module_name == 'rembg':
-                import rembg
-                validation['required_modules'][module_name] = "✅ Available"
-            elif module_name == 'pathlib':
-                from pathlib import Path
-                validation['required_modules'][module_name] = "✅ Built-in"
-        except ImportError as e:
-            validation['required_modules'][module_name] = f"❌ Missing"
-            validation['errors'].append(f"Required module {module_name} not available: {str(e)}")
-    
-    return validation
 
-def print_platform_info():
-    """Print platform compatibility information"""
-    validation = validate_platform()
+def setup_argparse() -> argparse.ArgumentParser:
+    """Setup command line argument parser"""
+    parser = argparse.ArgumentParser(
+        description="Wallege - Professional background removal and image combination",
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     
-    print(f"\n🖥️  Platform Information:")
-    print("=" * 50)
-    print(f"Platform: {validation['platform']}")
-    print(f"Python: {validation['python_version'].split()[0]}")
-    print(f"Display Available: {'✅' if validation['display_available'] else '❌'}")
-    print(f"Tkinter Available: {'✅' if validation['tkinter_available'] else '❌'}")
+    subparsers = parser.add_subparsers(dest='command', help='Available commands')
     
-    print(f"\n📦 Dependencies:")
-    for module, status in validation['required_modules'].items():
-        print(f"   {module}: {status}")
+    # Combine command
+    combine_parser = subparsers.add_parser(
+        'combine', 
+        help='Combine multiple images into a composite'
+    )
+    combine_parser.add_argument(
+        'input',
+        help='Input directory or list of image files'
+    )
+    combine_parser.add_argument(
+        '-o', '--output',
+        required=True,
+        help='Output file path for combined image'
+    )
+    combine_parser.add_argument(
+        '--arrangement',
+        choices=['horizontal', 'vertical', 'grid'],
+        default='horizontal',
+        help='How to arrange images (default: horizontal)'
+    )
+    combine_parser.add_argument(
+        '--resolution',
+        help='Target resolution (e.g., "1920x1080", "4k", "hd")'
+    )
+    combine_parser.add_argument(
+        '--width',
+        type=int,
+        help='Custom output width in pixels'
+    )
+    combine_parser.add_argument(
+        '--height', 
+        type=int,
+        help='Custom output height in pixels'
+    )
+    combine_parser.add_argument(
+        '--generative-fill',
+        action='store_true',
+        help='Use generative fill for seamless blending'
+    )
+    combine_parser.add_argument(
+        '--no-generative-fill',
+        action='store_true', 
+        help='Disable generative fill for faster processing'
+    )
+    combine_parser.add_argument(
+        '--debug',
+        action='store_true',
+        help='Enable debug mode with intermediate output files'
+    )
+    combine_parser.add_argument(
+        '--background-type',
+        choices=['auto', 'concat', 'texture', 'gradient'],
+        default='auto',
+        help='Type of background to generate (default: auto)'
+    )
     
-    if validation['warnings']:
-        print(f"\n⚠️  Warnings:")
-        for warning in validation['warnings']:
-            print(f"   • {warning}")
-    
-    if validation['errors']:
-        print(f"\n❌ Errors:")
-        for error in validation['errors']:
-            print(f"   • {error}")
-        return False
-    
-    print("\n✅ Platform validation passed!")
-    return True
+    return parser
+
 
 def main():
     """Main entry point"""
-    print("🎨 Background Removal & Seamless Combination CLI Tool")
-    print("=" * 55)
+    parser = setup_argparse()
+    args = parser.parse_args()
     
-    # Validate platform on startup
-    if len(sys.argv) > 1 and sys.argv[1] == 'validate':
-        success = print_platform_info()
-        sys.exit(0 if success else 1)
+    if not args.command:
+        parser.print_help()
+        return 1
     
     try:
-        cli = CLI()
-        cli.run()
-    except KeyboardInterrupt:
-        print("\n⚠️  Operation cancelled by user")
-        sys.exit(1)
+        debug_mode = getattr(args, 'debug', False)
+        combiner = ImageCombiner(debug=debug_mode)
+        
+        if args.command == 'combine':
+            # Get image files from input
+            image_paths = combiner.get_images_from_input(args.input)
+            
+            # Prepare combination options
+            options = {
+                'arrangement': args.arrangement,
+                'resolution': args.resolution,
+                'width': args.width,
+                'height': args.height,
+                'generative_fill': args.generative_fill and not args.no_generative_fill,
+                'background_type': args.background_type,
+                'debug': args.debug
+            }
+            
+            # Combine images
+            combiner.combine_images(image_paths, args.output, **options)
+            
+        return 0
+        
     except Exception as e:
-        print(f"❌ Unexpected error: {str(e)}")
-        print("\n💡 Try running 'python bgremove.py validate' to check your system")
-        sys.exit(1)
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
 
-if __name__ == "__main__":
-    main()
+
+if __name__ == '__main__':
+    sys.exit(main())

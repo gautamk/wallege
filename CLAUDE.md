@@ -4,15 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Wallege is a Python CLI tool for professional background removal and seamless image combination. It uses machine learning (rembg with ONNX runtime) to remove backgrounds from images and combines them into panoramic layouts using advanced blending techniques.
+Wallege is a Python CLI tool for professional background removal and seamless image combination. It uses machine learning (rembg with ONNX runtime) to remove backgrounds from images, creates composite backgrounds, and intelligently places subjects with even spacing for professional results.
 
 ### Key Components
 
-- **BackgroundProcessor**: Core ML-powered background removal using rembg library
-- **ResolutionManager**: Cross-platform screen resolution detection and preset management
-- **SeamlessBlender**: Advanced image blending with generative fill techniques
-- **BackgroundCombiner**: Main orchestrator for combining multiple background images
-- **CLI**: Command-line interface with multiple subcommands
+- **ImageCombiner**: Main orchestrator handling the complete 6-step pipeline
+- **Background Removal**: ML-powered segmentation using rembg library
+- **Background Extraction**: Inverse masking to isolate original backgrounds
+- **Inpainting**: OpenCV-based gap filling for seamless backgrounds
+- **Background Combination**: Multiple generation modes (concat, texture, gradient)
+- **Subject Placement**: Intelligent positioning with bounding box detection
+- **CLI**: Command-line interface with comprehensive options
 
 ## Development Commands
 
@@ -27,91 +29,105 @@ python main.py <command>
 
 ### Core Commands
 ```bash
-# Validate platform compatibility and dependencies
-python main.py validate
+# Basic combination with auto background type
+python main.py combine photos/ -o result.png
 
-# Show all available resolution presets
-python main.py list-resolutions
+# Debug mode with intermediate outputs
+python main.py combine photos/ -o result.png --debug
 
-# Process single image (creates removed_bg/, masks/, backgrounds/ subdirs)
-python main.py process input.jpg -o output/
+# Specific background types
+python main.py combine photos/ -o result.png --background-type concat --arrangement horizontal
+python main.py combine photos/ -o result.png --background-type texture
+python main.py combine photos/ -o result.png --background-type gradient
 
-# Process directory with custom resolution
-python main.py process photos/ -o output/ --resolution 4k
+# Resolution control
+python main.py combine photos/ -o result.png --resolution 4k
+python main.py combine photos/ -o result.png --width 3840 --height 2160
+python main.py combine photos/ -o result.png --width 2560  # Height calculated automatically
 
-# Combine backgrounds with different arrangements
-python main.py combine backgrounds/ -o panorama.png --arrangement horizontal
-python main.py combine backgrounds/ -o grid.png --arrangement grid
+# Arrangement options (affects concat mode and subject placement)
+python main.py combine photos/ -o result.png --arrangement horizontal
+python main.py combine photos/ -o result.png --arrangement vertical
+python main.py combine photos/ -o result.png --arrangement grid
 
-# Social media formats
-python main.py combine photos/ -o story.png --resolution instagram_story --arrangement vertical
-
-# Custom resolution with generative fill
-python main.py combine images/ -o result.png --width 2560 --height 1440 --generative-fill
-
-# Disable automatic background combination during processing
-python main.py process images/ -o output/ --no-combine
-
-# Disable generative fill for faster processing
-python main.py combine backgrounds/ -o result.png --no-generative-fill
+# Combined examples
+python main.py combine photos/ -o instagram.png --width 1080 --background-type gradient --debug
 ```
 
 ## Code Architecture
 
 ### Core Processing Pipeline
-1. **Input validation**: File/directory existence, permissions, supported formats
-2. **Background removal**: ML-based segmentation using rembg
-3. **Mask generation**: Binary masks from alpha channels or grayscale conversion
-4. **Background isolation**: Inverse masking to extract original backgrounds
-5. **Image combination**: Seamless blending with generative fill techniques
+1. **Background Removal**: ML-based segmentation using rembg to create transparent foreground subjects
+2. **Background Extraction**: Inverse masking to isolate original backgrounds where subjects were removed
+3. **Inpainting**: OpenCV algorithms (Telea/NS) fill gaps left by removed subjects for seamless backgrounds
+4. **Background Combination**: Combine multiple backgrounds using concat, texture, or gradient modes
+5. **Subject Placement**: Intelligent positioning based on actual subject bounding boxes (ignoring transparency)
+6. **Final Resize**: Aspect ratio-preserving scaling when single dimension specified
 
 ### Key Technical Details
 
 - **Supported formats**: JPG, JPEG, PNG, BMP, TIFF, WEBP (case-insensitive)
-- **Cross-platform resolution detection**: Uses tkinter, xrandr (Linux), system_profiler (macOS) with fallbacks
-- **Generative fill**: OpenCV inpainting (Telea/NS algorithms) for seamless transitions
-- **Blending modes**: Linear and Gaussian blending masks with configurable overlap widths
-- **Memory management**: Processes images individually to handle large datasets
-- **Output structure**: Creates organized subdirectories (removed_bg/, masks/, backgrounds/)
-- **Resolution presets**: HD, FHD, QHD, 4K, 5K, 8K, mobile formats, Instagram formats, ultrawide, cinema
-- **Arrangement options**: horizontal, vertical, grid layouts with intelligent sizing
-- **Aspect ratio handling**: Maintains or forces aspect ratios based on user preference
+- **Background types**: 
+  - `concat`: Seamless concatenation with gradient blending transitions
+  - `texture`: Tileable texture generation from first image
+  - `gradient`: Color-based gradients extracted from dominant colors
+  - `auto`: Intelligent type selection (1 image→texture, ≤4→concat, >4→gradient)
+- **Inpainting algorithms**: OpenCV Telea (fast, textured) and NS (smooth areas) methods
+- **Seamless blending**: Gradient masks with configurable blend widths for smooth transitions
+- **Bounding box detection**: Alpha channel analysis for precise subject positioning
+- **Resolution handling**: Presets (HD, FHD, QHD, 4K) and custom "WIDTHxHEIGHT" format
+- **Aspect ratio preservation**: Single dimension scaling maintains proportions
+- **Debug mode**: Comprehensive intermediate outputs for each processing step
+- **Memory efficiency**: Stream processing for large image sets
 
 ### Dependencies
 
 - **rembg**: ML background removal (requires ONNX runtime)
-- **opencv-python**: Image processing and blending
-- **PIL/Pillow**: Image I/O and format handling
-- **numpy**: Array operations for image data
-- **tkinter**: Optional GUI for resolution detection (with fallbacks)
+- **opencv-python**: Image processing, inpainting, and color space conversion
+- **PIL/Pillow**: Image I/O, format handling, alpha channel operations, and drawing
+- **numpy**: Array operations for efficient image data manipulation
+- **math**: Grid layout calculations and aspect ratio handling
 
 ### Error Handling Patterns
 
-- Comprehensive permission checking for input/output paths
-- Graceful fallbacks for headless systems (no DISPLAY)
-- Platform-specific resolution detection with multiple fallback methods
-- Detailed validation with user-friendly error messages
+- Comprehensive file existence and permission validation
+- Graceful handling of unsupported image formats with warnings
+- Fallback resolution defaults when invalid custom formats provided
+- Protected division operations with None value checking
+- Alpha channel validation with automatic RGBA conversion
 
 ## Workflow and Use Cases
 
 ### Primary Use Cases
-- **Content Creation**: Remove backgrounds for social media posts, presentations
-- **Panoramic Photography**: Combine multiple background images into seamless panoramas
-- **Batch Processing**: Handle entire directories of images efficiently
-- **Social Media**: Generate content in specific formats (Instagram story, square posts)
-- **Professional Photography**: Create composite backgrounds and environmental scenes
+- **Professional Composites**: Create studio-quality images with subjects on custom backgrounds
+- **Social Media Content**: Generate posts with consistent subject spacing and branded backgrounds
+- **Product Photography**: Combine multiple product shots on seamless backgrounds
+- **Event Photography**: Create group composites with even subject distribution
+- **Marketing Materials**: Professional layouts with controlled background aesthetics
 
-### Two-Step Workflow
-1. **Process**: `python main.py process` - Removes backgrounds, creates masks, isolates backgrounds
-2. **Combine**: `python main.py combine` - Blends isolated backgrounds into seamless compositions
+### Single-Command Workflow
+The tool now uses a streamlined single-command approach:
+```bash
+python main.py combine input_photos/ -o final_result.png [options]
+```
+This automatically handles the complete pipeline from raw photos to final composite.
 
 ## Common Development Tasks
 
+### Adding New Background Types
+1. Add new type to CLI choices in `setup_argparse()` around main.py:360
+2. Create new generation method like `create_X_background()` in ImageCombiner class
+3. Add case to `create_combined_background()` method around main.py:512
+4. Update auto-determination logic in `determine_background_type()` around main.py:278
+
+### Modifying Inpainting Algorithms
+Update `inpaint_backgrounds()` method around main.py:194-259, specifically the cv2.inpaint() calls
+
 ### Adding New Resolution Presets
-Edit `ResolutionManager.get_resolution_presets()` in main.py:209-225
+Add resolution cases in the resolution handling section around main.py:770-784
 
-### Modifying Blending Algorithms  
-Update `SeamlessBlender` class methods in main.py:246-482
+### Customizing Subject Placement
+Modify `calculate_subject_positions()` method around main.py:606-675 for different spacing algorithms
 
-### Adding New Arrangement Types
-Extend `combine_backgrounds()` method in main.py:492 and CLI parser in main.py:675-709
+### Debug Output Customization
+Each step has debug output sections - search for `debug_dir and self.debug` patterns throughout the code
