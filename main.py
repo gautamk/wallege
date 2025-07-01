@@ -80,12 +80,12 @@ class ImageCombiner:
         """Check if file has supported image extension"""
         return path.suffix.lower() in self.SUPPORTED_FORMATS
     
-    def remove_backgrounds(self, image_paths: List[Path], debug_dir: Path = None) -> List[Image.Image]:
+    def remove_backgrounds(self, prescaled_images: List[Image.Image], debug_dir: Path = None) -> List[Image.Image]:
         """
-        Remove backgrounds from list of images using rembg.
+        Remove backgrounds from list of pre-scaled images using rembg.
         
         Args:
-            image_paths: List of Path objects for input images
+            prescaled_images: List of pre-scaled PIL Images
             debug_dir: Optional directory to save debug output
             
         Returns:
@@ -93,14 +93,15 @@ class ImageCombiner:
         """
         processed_images = []
         
-        print(f"Step 1: Removing backgrounds from {len(image_paths)} images...")
+        print(f"Step 1: Removing backgrounds from {len(prescaled_images)} pre-scaled images...")
         
-        for i, image_path in enumerate(image_paths, 1):
-            print(f"  Processing {i}/{len(image_paths)}: {image_path.name}")
+        for i, prescaled_image in enumerate(prescaled_images, 1):
+            print(f"  Processing {i}/{len(prescaled_images)}: Background removal")
             
-            # Load and process image
-            with open(image_path, 'rb') as input_file:
-                input_data = input_file.read()
+            # Convert PIL image to bytes for rembg
+            img_bytes = io.BytesIO()
+            prescaled_image.save(img_bytes, format='PNG')
+            input_data = img_bytes.getvalue()
             
             # Remove background using rembg
             output_data = remove(input_data)
@@ -111,19 +112,19 @@ class ImageCombiner:
             
             # Save debug output if requested
             if debug_dir and self.debug:
-                debug_path = debug_dir / f"step1_bg_removed_{image_path.stem}.png"
+                debug_path = debug_dir / f"step1_bg_removed_{i:03d}.png"
                 processed_image.save(debug_path)
                 print(f"    Debug: Saved background-removed image to {debug_path}")
         
         print(f"Step 1 complete: {len(processed_images)} images processed")
         return processed_images
     
-    def extract_backgrounds(self, original_paths: List[Path], processed_images: List[Image.Image], debug_dir: Path = None) -> List[Image.Image]:
+    def extract_backgrounds(self, prescaled_images: List[Image.Image], processed_images: List[Image.Image], debug_dir: Path = None) -> List[Image.Image]:
         """
-        Extract backgrounds from original images using processed images as masks.
+        Extract backgrounds from pre-scaled images using processed images as masks.
         
         Args:
-            original_paths: List of original image file paths
+            prescaled_images: List of pre-scaled original images
             processed_images: List of background-removed images to use as masks
             debug_dir: Optional directory to save debug output
             
@@ -132,15 +133,13 @@ class ImageCombiner:
         """
         background_images = []
         
-        print(f"\nStep 2: Extracting backgrounds from {len(original_paths)} images...")
+        print(f"\nStep 2: Extracting backgrounds from {len(prescaled_images)} pre-scaled images...")
         
-        for i, (original_path, processed_image) in enumerate(zip(original_paths, processed_images), 1):
-            print(f"  Processing {i}/{len(original_paths)}: {original_path.name}")
+        for i, (prescaled_image, processed_image) in enumerate(zip(prescaled_images, processed_images), 1):
+            print(f"  Processing {i}/{len(prescaled_images)}: Background extraction")
             
-            # Load original image
-            original_image = Image.open(original_path).convert('RGBA')
-            
-            # Create mask from processed image alpha channel
+            # Ensure both images are RGBA
+            original_image = prescaled_image.convert('RGBA')
             if processed_image.mode != 'RGBA':
                 processed_image = processed_image.convert('RGBA')
             
@@ -174,15 +173,15 @@ class ImageCombiner:
             # Save debug output if requested
             if debug_dir and self.debug:
                 # Save mask
-                mask_path = debug_dir / f"step2_mask_{original_path.stem}.png"
+                mask_path = debug_dir / f"step2_mask_{i:03d}.png"
                 mask.save(mask_path)
                 
                 # Save inverted mask
-                inverted_mask_path = debug_dir / f"step2_inverted_mask_{original_path.stem}.png"
+                inverted_mask_path = debug_dir / f"step2_inverted_mask_{i:03d}.png"
                 inverted_mask.save(inverted_mask_path)
                 
                 # Save extracted background
-                bg_path = debug_dir / f"step2_background_{original_path.stem}.png"
+                bg_path = debug_dir / f"step2_background_{i:03d}.png"
                 background_image.save(bg_path)
                 
                 print(f"    Debug: Saved mask to {mask_path}")
@@ -777,6 +776,71 @@ class ImageCombiner:
         print(f"Step 6 complete: Resized from {current_width}x{current_height} to {new_width}x{new_height}")
         return resized_image
     
+    def prescale_images(self, image_paths: List[Path], target_size: tuple, debug_dir: Path = None) -> List[Image.Image]:
+        """
+        Pre-scale input images to fit within final composite size for optimal processing.
+        
+        Args:
+            image_paths: List of input image file paths
+            target_size: (width, height) of final composite
+            debug_dir: Optional directory to save debug output
+            
+        Returns:
+            List of pre-scaled PIL Images
+        """
+        print(f"\nStep 0: Pre-scaling {len(image_paths)} images to fit within {target_size[0]}x{target_size[1]}...")
+        
+        prescaled_images = []
+        
+        # Calculate maximum size per image based on arrangement and number of images
+        num_images = len(image_paths)
+        if num_images <= 2:
+            # For 1-2 images, allow them to be larger
+            max_width = target_size[0] // 2
+            max_height = target_size[1] // 2
+        elif num_images <= 4:
+            # For 3-4 images, medium size
+            max_width = target_size[0] // 3
+            max_height = target_size[1] // 3
+        else:
+            # For many images, smaller size
+            max_width = target_size[0] // 4
+            max_height = target_size[1] // 4
+        
+        for i, image_path in enumerate(image_paths, 1):
+            print(f"  Scaling {i}/{num_images}: {image_path.name}")
+            
+            # Load image
+            original_image = Image.open(image_path)
+            original_width, original_height = original_image.size
+            
+            # Calculate scaling factor to fit within max dimensions
+            width_scale = max_width / original_width
+            height_scale = max_height / original_height
+            scale_factor = min(width_scale, height_scale, 1.0)  # Don't upscale
+            
+            if scale_factor < 1.0:
+                # Scale down the image
+                new_width = int(original_width * scale_factor)
+                new_height = int(original_height * scale_factor)
+                scaled_image = original_image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                print(f"    Scaled from {original_width}x{original_height} to {new_width}x{new_height} (factor: {scale_factor:.2f})")
+            else:
+                # Keep original size
+                scaled_image = original_image
+                print(f"    Kept original size {original_width}x{original_height}")
+            
+            prescaled_images.append(scaled_image)
+            
+            # Save debug output if requested
+            if debug_dir and self.debug:
+                debug_path = debug_dir / f"step0_prescaled_{i:03d}_{image_path.stem}.png"
+                scaled_image.save(debug_path)
+                print(f"    Debug: Saved pre-scaled image to {debug_path}")
+        
+        print(f"Step 0 complete: {len(prescaled_images)} images pre-scaled")
+        return prescaled_images
+    
     def combine_images(self, image_paths: List[Path], output_path: str, **kwargs) -> None:
         """
         Combine multiple images into a single composite.
@@ -794,17 +858,7 @@ class ImageCombiner:
             debug_dir.mkdir(exist_ok=True)
             print(f"Debug mode enabled: outputs will be saved to {debug_dir}")
         
-        # Step 1: Remove backgrounds
-        processed_images = self.remove_backgrounds(image_paths, debug_dir)
-        
-        # Step 2: Extract backgrounds using masks
-        background_images = self.extract_backgrounds(image_paths, processed_images, debug_dir)
-        
-        # Step 3: Inpaint backgrounds to fill gaps
-        inpainted_images = self.inpaint_backgrounds(background_images, processed_images, debug_dir)
-        
-        # Step 4: Create combined background
-        # Determine target size with proper fallbacks
+        # Determine target size with proper fallbacks (needed for pre-scaling)
         specified_width = kwargs.get('width')
         specified_height = kwargs.get('height')
         
@@ -846,6 +900,19 @@ class ImageCombiner:
         
         target_size = (target_width, target_height)
         
+        # Step 0: Pre-scale images to fit within final composite size
+        prescaled_images = self.prescale_images(image_paths, target_size, debug_dir)
+        
+        # Step 1: Remove backgrounds
+        processed_images = self.remove_backgrounds(prescaled_images, debug_dir)
+        
+        # Step 2: Extract backgrounds using masks
+        background_images = self.extract_backgrounds(prescaled_images, processed_images, debug_dir)
+        
+        # Step 3: Inpaint backgrounds to fill gaps
+        inpainted_images = self.inpaint_backgrounds(background_images, processed_images, debug_dir)
+        
+        # Step 4: Create combined background
         combined_background = self.create_combined_background(
             inpainted_images,
             kwargs.get('background_type', 'auto'),
