@@ -602,9 +602,9 @@ class ImageCombiner:
         
         return bbox
     
-    def calculate_subject_positions(self, foreground_images: List[Image.Image], background_size: tuple, arrangement: str = 'horizontal') -> List[tuple]:
+    def calculate_subject_positions_and_scale(self, foreground_images: List[Image.Image], background_size: tuple, arrangement: str = 'horizontal') -> List[tuple]:
         """
-        Calculate evenly spaced positions for subjects based on their bounding boxes.
+        Calculate evenly spaced positions and optimal scaling for subjects to fit background.
         
         Args:
             foreground_images: List of foreground images with subjects
@@ -612,12 +612,12 @@ class ImageCombiner:
             arrangement: 'horizontal' or 'vertical' spacing
             
         Returns:
-            List of (x, y) positions for each subject
+            List of (scaled_image, x, y) tuples for each subject
         """
         if not foreground_images:
             return []
         
-        positions = []
+        results = []
         subject_boxes = []
         
         # Get bounding boxes for all subjects
@@ -627,55 +627,106 @@ class ImageCombiner:
             subject_height = bbox[3] - bbox[1]
             subject_boxes.append((bbox, subject_width, subject_height))
         
+        # Calculate optimal scaling to fit all subjects
         if arrangement == 'horizontal':
-            # Calculate horizontal spacing
-            total_subject_width = sum(box[1] for box in subject_boxes)
-            available_width = background_size[0]
+            # For horizontal arrangement, scale to fit height and distribute width
+            max_height = max(box[2] for box in subject_boxes)  # Max subject height
+            available_height = background_size[1] * 0.8  # Use 80% of background height
+            height_scale = available_height / max_height if max_height > 0 else 1.0
+            
+            # Calculate total width after scaling
+            total_scaled_width = sum(box[1] * height_scale for box in subject_boxes)
+            available_width = background_size[0] * 0.9  # Use 90% of background width
+            
+            # If total width exceeds available width, scale down further
+            if total_scaled_width > available_width:
+                width_scale = available_width / total_scaled_width
+                final_scale = height_scale * width_scale
+            else:
+                final_scale = height_scale
+            
+            # Calculate spacing
+            scaled_widths = [box[1] * final_scale for box in subject_boxes]
+            total_width = sum(scaled_widths)
             
             if len(foreground_images) > 1:
-                spacing = (available_width - total_subject_width) / (len(foreground_images) + 1)
+                spacing = (background_size[0] - total_width) / (len(foreground_images) + 1)
             else:
-                spacing = (available_width - total_subject_width) / 2
+                spacing = (background_size[0] - total_width) / 2
             
             current_x = spacing
             
-            for i, (bbox, subject_width, subject_height) in enumerate(subject_boxes):
-                # Center vertically, position horizontally with spacing
-                x = current_x - bbox[0]  # Adjust for bbox offset
-                y = (background_size[1] - subject_height) // 2 - bbox[1]  # Center vertically, adjust for bbox offset
+            for img, (bbox, subject_width, subject_height) in zip(foreground_images, subject_boxes):
+                # Scale the image
+                scaled_width = int(img.size[0] * final_scale)
+                scaled_height = int(img.size[1] * final_scale)
+                scaled_img = img.resize((scaled_width, scaled_height), Image.Resampling.LANCZOS)
                 
-                positions.append((int(x), int(y)))
-                current_x += subject_width + spacing
+                # Calculate position
+                scaled_bbox = self.get_subject_bounding_box(scaled_img)
+                scaled_subject_width = scaled_bbox[2] - scaled_bbox[0]
+                scaled_subject_height = scaled_bbox[3] - scaled_bbox[1]
+                
+                x = current_x - scaled_bbox[0]
+                y = (background_size[1] - scaled_subject_height) // 2 - scaled_bbox[1]
+                
+                results.append((scaled_img, int(x), int(y)))
+                current_x += scaled_subject_width + spacing
                 
         elif arrangement == 'vertical':
-            # Calculate vertical spacing
-            total_subject_height = sum(box[2] for box in subject_boxes)
-            available_height = background_size[1]
+            # For vertical arrangement, scale to fit width and distribute height
+            max_width = max(box[1] for box in subject_boxes)  # Max subject width
+            available_width = background_size[0] * 0.8  # Use 80% of background width
+            width_scale = available_width / max_width if max_width > 0 else 1.0
+            
+            # Calculate total height after scaling
+            total_scaled_height = sum(box[2] * width_scale for box in subject_boxes)
+            available_height = background_size[1] * 0.9  # Use 90% of background height
+            
+            # If total height exceeds available height, scale down further
+            if total_scaled_height > available_height:
+                height_scale = available_height / total_scaled_height
+                final_scale = width_scale * height_scale
+            else:
+                final_scale = width_scale
+            
+            # Calculate spacing
+            scaled_heights = [box[2] * final_scale for box in subject_boxes]
+            total_height = sum(scaled_heights)
             
             if len(foreground_images) > 1:
-                spacing = (available_height - total_subject_height) / (len(foreground_images) + 1)
+                spacing = (background_size[1] - total_height) / (len(foreground_images) + 1)
             else:
-                spacing = (available_height - total_subject_height) / 2
+                spacing = (background_size[1] - total_height) / 2
             
             current_y = spacing
             
-            for i, (bbox, subject_width, subject_height) in enumerate(subject_boxes):
-                # Center horizontally, position vertically with spacing
-                x = (background_size[0] - subject_width) // 2 - bbox[0]  # Center horizontally, adjust for bbox offset
-                y = current_y - bbox[1]  # Adjust for bbox offset
+            for img, (bbox, subject_width, subject_height) in zip(foreground_images, subject_boxes):
+                # Scale the image
+                scaled_width = int(img.size[0] * final_scale)
+                scaled_height = int(img.size[1] * final_scale)
+                scaled_img = img.resize((scaled_width, scaled_height), Image.Resampling.LANCZOS)
                 
-                positions.append((int(x), int(y)))
-                current_y += subject_height + spacing
+                # Calculate position
+                scaled_bbox = self.get_subject_bounding_box(scaled_img)
+                scaled_subject_width = scaled_bbox[2] - scaled_bbox[0]
+                scaled_subject_height = scaled_bbox[3] - scaled_bbox[1]
+                
+                x = (background_size[0] - scaled_subject_width) // 2 - scaled_bbox[0]
+                y = current_y - scaled_bbox[1]
+                
+                results.append((scaled_img, int(x), int(y)))
+                current_y += scaled_subject_height + spacing
         
         else:
             # Default to horizontal if arrangement not recognized
-            return self.calculate_subject_positions(foreground_images, background_size, 'horizontal')
+            return self.calculate_subject_positions_and_scale(foreground_images, background_size, 'horizontal')
         
-        return positions
+        return results
     
     def compose_final_image(self, background: Image.Image, foreground_images: List[Image.Image], arrangement: str = 'horizontal', debug_dir: Path = None) -> Image.Image:
         """
-        Compose final image by placing foreground subjects on background with even spacing.
+        Compose final image by placing scaled foreground subjects on background with even spacing.
         
         Args:
             background: Combined background image
@@ -694,31 +745,31 @@ class ImageCombiner:
         # Create final composite
         final_image = background.copy()
         
-        # Calculate positions for subjects
-        positions = self.calculate_subject_positions(foreground_images, background.size, arrangement)
+        # Calculate positions and scaling for subjects
+        subject_data = self.calculate_subject_positions_and_scale(foreground_images, background.size, arrangement)
         
         # Composite each subject onto the background
-        for i, (fg_image, position) in enumerate(zip(foreground_images, positions)):
-            print(f"  Placing subject {i+1}/{len(foreground_images)} at position {position}")
+        for i, (scaled_img, x, y) in enumerate(subject_data):
+            print(f"  Placing subject {i+1}/{len(foreground_images)} at position ({x}, {y}) with size {scaled_img.size}")
             
             # Ensure foreground image has alpha channel
-            if fg_image.mode != 'RGBA':
-                fg_image = fg_image.convert('RGBA')
+            if scaled_img.mode != 'RGBA':
+                scaled_img = scaled_img.convert('RGBA')
             
             # Paste foreground onto final image using alpha channel as mask
-            final_image.paste(fg_image, position, fg_image)
+            final_image.paste(scaled_img, (x, y), scaled_img)
             
             # Save debug output if requested
             if debug_dir and self.debug:
                 # Save individual subject bounding box visualization
-                debug_img = fg_image.copy()
-                bbox = self.get_subject_bounding_box(fg_image)
+                debug_img = scaled_img.copy()
+                bbox = self.get_subject_bounding_box(scaled_img)
                 draw = ImageDraw.Draw(debug_img)
                 draw.rectangle(bbox, outline=(255, 0, 0, 255), width=2)
                 
-                debug_path = debug_dir / f"step5_subject_{i+1}_bbox.png"
+                debug_path = debug_dir / f"step5_subject_{i+1}_scaled_bbox.png"
                 debug_img.save(debug_path)
-                print(f"    Debug: Saved subject bbox to {debug_path}")
+                print(f"    Debug: Saved scaled subject bbox to {debug_path}")
         
         # Save debug output for final composite
         if debug_dir and self.debug:
