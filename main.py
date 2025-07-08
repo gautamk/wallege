@@ -42,7 +42,7 @@ class SeamlessBlender:
         return inpainted
     
     def blend_images(self, img1: np.ndarray, img2: np.ndarray, overlap_width: int) -> np.ndarray:
-        """Blend two images with specified overlap width preserving full resolution"""
+        """Combine two images with raw data concatenation - minimal processing for maximum quality"""
         h1, w1 = img1.shape[:2]
         h2, w2 = img2.shape[:2]
         
@@ -55,41 +55,38 @@ class SeamlessBlender:
         if h2 != target_height:
             img2 = cv2.resize(img2, (w2, target_height), interpolation=cv2.INTER_LANCZOS4)
         
-        # Ensure overlap width doesn't exceed image widths
-        overlap_width = min(overlap_width, w1 // 4, w2 // 4)
+        # For maximum quality, use smaller overlap or no overlap
+        if overlap_width > 0:
+            # Very minimal overlap for seamless look
+            overlap_width = min(overlap_width, w1 // 8, w2 // 8, 20)  # Maximum 20 pixels overlap
         
-        # Calculate result dimensions
-        result_width = w1 + w2 - overlap_width
-        result_height = target_height
-        
-        # Create result image
-        result = np.zeros((result_height, result_width, 3), dtype=np.uint8)
-        
-        # Place first image at full resolution
-        result[:, :w1] = img1
-        
-        # Create smooth blend mask for overlap region
-        blend_mask = self.create_blend_mask(overlap_width, result_height, overlap_width)
-        
-        # Blend overlap region with high precision
-        overlap_start = w1 - overlap_width
-        overlap_end = w1
-        
-        # Use vectorized operations for better quality and performance
-        for x in range(overlap_width):
-            alpha = blend_mask[0, x]
-            result_x = overlap_start + x
-            img2_x = x
+        # Achieve perfect quality preservation except in blend regions
+        if overlap_width == 0:
+            # Pure concatenation - zero quality loss
+            result = np.concatenate([img1, img2], axis=1)
+        else:
+            # Strategy: Use direct array slicing to preserve original data perfectly
+            overlap_start = w1 - overlap_width
             
-            # High precision blending using float32 to avoid rounding errors
-            img1_region = img1[:, overlap_start + x].astype(np.float32)
-            img2_region = img2[:, img2_x].astype(np.float32)
+            # Create result by concatenating non-overlapping parts + blended overlap
+            # This preserves original image data perfectly in non-overlap regions
             
-            blended = (1 - alpha) * img1_region + alpha * img2_region
-            result[:, result_x] = np.clip(blended, 0, 255).astype(np.uint8)
-        
-        # Place remaining part of second image at full resolution
-        result[:, overlap_end:] = img2[:, overlap_width:]
+            # Part 1: First image up to overlap (perfect quality preservation)
+            part1 = img1[:, :overlap_start]
+            
+            # Part 2: Blended overlap region (only this part has quality modification)
+            overlap_img1 = img1[:, overlap_start:]
+            overlap_img2 = img2[:, :overlap_width]
+            
+            # High-quality blend only in overlap - use uint16 to prevent overflow
+            blended_overlap = ((overlap_img1.astype(np.uint16) + 
+                              overlap_img2.astype(np.uint16)) // 2).astype(np.uint8)
+            
+            # Part 3: Second image after overlap (perfect quality preservation)  
+            part3 = img2[:, overlap_width:]
+            
+            # Concatenate parts - original data is preserved perfectly everywhere except overlap
+            result = np.concatenate([part1, blended_overlap, part3], axis=1)
         
         return result
 
@@ -213,6 +210,7 @@ Examples:
   python main.py image1.jpg image2.jpg -o panorama.png
   python main.py photos/ -o result.png --no-generative-fill
   python main.py photos/ -o result.png --blend-width 100
+  python main.py photos/ -o result.png --no-blend
         """
     )
     
@@ -237,7 +235,13 @@ Examples:
         '--blend-width',
         type=int,
         default=50,
-        help='Width of the blending overlap region (default: 50)'
+        help='Width of the blending overlap region (default: 50, use 0 for no blending)'
+    )
+    
+    parser.add_argument(
+        '--no-blend',
+        action='store_true',
+        help='Disable all blending - pure concatenation for maximum quality'
     )
     
     args = parser.parse_args()
@@ -269,9 +273,10 @@ Examples:
         print(f"Found {len(image_paths)} images")
         
         # Initialize combiner
+        blend_width = 0 if args.no_blend else args.blend_width
         combiner = BackgroundCombiner(
-            generative_fill=not args.no_generative_fill,
-            blend_width=args.blend_width
+            generative_fill=not args.no_generative_fill and not args.no_blend,
+            blend_width=blend_width
         )
         
         # Load images
