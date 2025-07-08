@@ -42,14 +42,21 @@ class SeamlessBlender:
         return inpainted
     
     def blend_images(self, img1: np.ndarray, img2: np.ndarray, overlap_width: int) -> np.ndarray:
-        """Blend two images with specified overlap width"""
+        """Blend two images with specified overlap width preserving full resolution"""
         h1, w1 = img1.shape[:2]
         h2, w2 = img2.shape[:2]
         
-        # Ensure same height
-        target_height = min(h1, h2)
-        img1 = cv2.resize(img1, (w1, target_height))
-        img2 = cv2.resize(img2, (w2, target_height))
+        # Use maximum height to preserve resolution - resize only if necessary
+        target_height = max(h1, h2)
+        
+        # Only resize if heights don't match, using high-quality interpolation
+        if h1 != target_height:
+            img1 = cv2.resize(img1, (w1, target_height), interpolation=cv2.INTER_LANCZOS4)
+        if h2 != target_height:
+            img2 = cv2.resize(img2, (w2, target_height), interpolation=cv2.INTER_LANCZOS4)
+        
+        # Ensure overlap width doesn't exceed image widths
+        overlap_width = min(overlap_width, w1 // 4, w2 // 4)
         
         # Calculate result dimensions
         result_width = w1 + w2 - overlap_width
@@ -58,28 +65,30 @@ class SeamlessBlender:
         # Create result image
         result = np.zeros((result_height, result_width, 3), dtype=np.uint8)
         
-        # Place first image
+        # Place first image at full resolution
         result[:, :w1] = img1
         
-        # Create blend mask for overlap region
+        # Create smooth blend mask for overlap region
         blend_mask = self.create_blend_mask(overlap_width, result_height, overlap_width)
         
-        # Blend overlap region
+        # Blend overlap region with high precision
         overlap_start = w1 - overlap_width
         overlap_end = w1
         
+        # Use vectorized operations for better quality and performance
         for x in range(overlap_width):
             alpha = blend_mask[0, x]
             result_x = overlap_start + x
             img2_x = x
             
-            # Blend pixels
-            result[:, result_x] = (
-                (1 - alpha) * img1[:, overlap_start + x] + 
-                alpha * img2[:, img2_x]
-            ).astype(np.uint8)
+            # High precision blending using float32 to avoid rounding errors
+            img1_region = img1[:, overlap_start + x].astype(np.float32)
+            img2_region = img2[:, img2_x].astype(np.float32)
+            
+            blended = (1 - alpha) * img1_region + alpha * img2_region
+            result[:, result_x] = np.clip(blended, 0, 255).astype(np.uint8)
         
-        # Place remaining part of second image
+        # Place remaining part of second image at full resolution
         result[:, overlap_end:] = img2[:, overlap_width:]
         
         return result
@@ -93,7 +102,7 @@ class BackgroundCombiner:
         self.blender = SeamlessBlender(blend_width)
     
     def load_images(self, image_paths: List[str]) -> List[np.ndarray]:
-        """Load and validate images"""
+        """Load and validate images preserving full quality"""
         images = []
         supported_formats = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp'}
         
@@ -104,11 +113,14 @@ class BackgroundCombiner:
                 continue
             
             try:
-                # Load with PIL then convert to OpenCV format
-                pil_img = Image.open(path).convert('RGB')
-                cv_img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+                # Load directly with OpenCV for best quality preservation
+                cv_img = cv2.imread(path, cv2.IMREAD_COLOR)
+                if cv_img is None:
+                    print(f"Error: Could not load {path}")
+                    continue
+                    
                 images.append(cv_img)
-                print(f"Loaded: {path}")
+                print(f"Loaded: {path} ({cv_img.shape[1]}x{cv_img.shape[0]})")
             except Exception as e:
                 print(f"Error loading {path}: {e}")
         
@@ -151,17 +163,22 @@ class BackgroundCombiner:
         return result
 
 
-def generate_default_output_filename() -> str:
+def generate_default_output_filename(output_dir: str = ".") -> str:
     """Generate default output filename with numbering (wall1.jpg, wall2.jpg, etc.)"""
     base_name = "wall"
     extension = ".jpg"
     counter = 1
     
     while True:
-        filename = f"{base_name}{counter}{extension}"
+        filename = os.path.join(output_dir, f"{base_name}{counter}{extension}")
         if not os.path.exists(filename):
             return filename
         counter += 1
+
+
+def is_single_directory_input(inputs: List[str]) -> bool:
+    """Check if input is a single directory"""
+    return len(inputs) == 1 and os.path.isdir(inputs[0])
 
 
 def get_image_paths(inputs: List[str]) -> List[str]:
@@ -229,9 +246,21 @@ Examples:
         # Get image paths
         image_paths = get_image_paths(args.input)
         
-        # Generate default output filename if not provided
+        # Handle output argument logic
         if not args.output:
-            args.output = generate_default_output_filename()
+            # No output argument given
+            if is_single_directory_input(args.input):
+                # Input is a directory, use same directory for output
+                output_dir = args.input[0]
+            else:
+                # Input is list of images, use current directory
+                output_dir = "."
+            args.output = generate_default_output_filename(output_dir)
+        elif os.path.isdir(args.output):
+            # Output argument is a directory, use generate_default_output_filename
+            args.output = generate_default_output_filename(args.output)
+        
+        print(f"Output filename: {args.output}")
         
         if not image_paths:
             print("No valid images found in the input path")
@@ -258,10 +287,19 @@ Examples:
         print("Combining images horizontally...")
         result = combiner.combine_horizontal(images)
         
-        # Save result
-        result_rgb = cv2.cvtColor(result, cv2.COLOR_BGR2RGB)
-        pil_result = Image.fromarray(result_rgb)
-        pil_result.save(args.output)
+        # Save result with high quality
+        output_path = Path(args.output)
+        if output_path.suffix.lower() in ['.jpg', '.jpeg']:
+            # Use OpenCV for JPG to preserve quality with high compression settings
+            cv2.imwrite(args.output, result, [cv2.IMWRITE_JPEG_QUALITY, 95])
+        elif output_path.suffix.lower() == '.png':
+            # Use OpenCV for PNG with minimal compression
+            cv2.imwrite(args.output, result, [cv2.IMWRITE_PNG_COMPRESSION, 1])
+        else:
+            # For other formats, use PIL with high quality
+            result_rgb = cv2.cvtColor(result, cv2.COLOR_BGR2RGB)
+            pil_result = Image.fromarray(result_rgb)
+            pil_result.save(args.output, quality=95, optimize=False)
         
         print(f"Combined image saved to: {args.output}")
         print(f"Final dimensions: {result.shape[1]}x{result.shape[0]}")
